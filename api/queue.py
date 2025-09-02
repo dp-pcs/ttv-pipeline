@@ -140,6 +140,7 @@ class JobQueue:
             status=JobStatus.QUEUED,
             created_at=created_at,
             prompt=request.prompt,
+            title=effective_config.get('title'),
             config=effective_config
         )
         

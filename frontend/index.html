@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CineForge - AI Video Generation Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="logo">
+                <img src="assets/cineforge_logo.png" alt="CineForge Logo" class="logo-image">
+                <h1>CineForge</h1>
+            </div>
+            <div class="status-indicator">
+                <span id="connection-status" class="status-dot disconnected"></span>
+                <span id="connection-text">Connecting...</span>
+            </div>
+            <nav class="nav">
+                <button class="nav-btn active" data-section="dashboard">
+                    <i class="fas fa-home"></i> Dashboard
+                </button>
+                <button class="nav-btn" data-section="transcription">
+                    <i class="fas fa-microphone"></i> Transcription
+                </button>
+                <button class="nav-btn" data-section="settings">
+                    <i class="fas fa-cog"></i> Settings
+                </button>
+                <button class="nav-btn" data-section="downloads">
+                    <i class="fas fa-download"></i> Downloads
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <!-- Dashboard Section -->
+        <section id="dashboard" class="section active">
+            <div class="container">
+                <div class="welcome-card">
+                    <h2>Welcome to CineForge</h2>
+                    <p>Transform your text prompts into professional cinematic videos using advanced AI</p>
+                </div>
+
+                <!-- Pipeline Process Diagram -->
+                <div class="card pipeline-showcase">
+                    <h3><i class="fas fa-project-diagram"></i> How CineForge Works</h3>
+                    <div class="pipeline-diagram">
+                        <img src="assets/cineforge_pipeline.png" alt="CineForge Pipeline Process" class="pipeline-image">
+                    </div>
+                    <p class="pipeline-description">
+                        Our advanced AI pipeline breaks down your text into intelligent segments, generates keyframes, 
+                        and stitches everything together for seamless, professional video output.
+                    </p>
+                </div>
+
+                <!-- Prompt Entry -->
+                <div class="card">
+                    <h3><i class="fas fa-pen"></i> Create New Video</h3>
+                    <div class="prompt-form">
+                        <div class="form-group">
+                            <label for="video-title">Video Title (Optional)</label>
+                            <input 
+                                type="text" 
+                                id="video-title" 
+                                placeholder="Give your video a descriptive title..."
+                                maxlength="100"
+                            >
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="video-prompt">Video Prompt</label>
+                            <textarea 
+                                id="video-prompt" 
+                                placeholder="Describe the video you want to create... 
+
+For LONGER videos (20-30+ seconds), use complex prompts with multiple actions:
+
+Example: A master chef in a busy restaurant kitchen starts by carefully selecting fresh ingredients from wooden crates, examining tomatoes and herbs under warm kitchen lighting. He moves to a marble prep station where he precisely chops vegetables with practiced knife skills, steam rising from nearby pots. Next, he crafts handmade pasta, flour dusting the air as he works the dough with rhythmic motions. The camera follows as he moves to the stove, tossing ingredients in a sizzling pan with dramatic flame bursts. Finally, he artfully plates the finished dish, garnishing with microgreens and drizzling sauce with the precision of an artist."
+                                rows="6"
+                            ></textarea>
+                            <div class="prompt-hints">
+                                <small><i class="fas fa-lightbulb"></i> <strong>For longer videos:</strong> Include multiple distinct actions, location changes, camera movements, and detailed descriptions. Complex prompts = more segments = longer videos!</small>
+                                <br>
+                                <small><i class="fas fa-clock"></i> Simple prompts create 1-2 segments (5-10s) • Complex prompts create 4-6 segments (20-30s)</small>
+                                <br>
+                                <small><i class="fas fa-keyboard"></i> Up to 8,000 characters allowed - use detailed descriptions for best results!</small>
+                            </div>
+                        </div>
+                        
+                        <div class="form-actions">
+                            <button id="generate-video" class="btn-primary">
+                                <i class="fas fa-magic"></i> Generate Video
+                            </button>
+                            <button id="clear-prompt" class="btn-secondary">
+                                <i class="fas fa-eraser"></i> Clear
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Job Queue -->
+                <div class="card">
+                    <h3><i class="fas fa-tasks"></i> Job Queue</h3>
+                    <div id="job-queue" class="job-queue">
+                        <div class="empty-state">
+                            <i class="fas fa-inbox"></i>
+                            <p>No jobs in queue. Create your first video above!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Transcription Section -->
+        <section id="transcription" class="section">
+            <div class="container">
+                <div class="card">
+                    <h3><i class="fas fa-microphone"></i> Audio Transcription</h3>
+                    <p class="section-description">Upload audio files and get text transcriptions with timestamps using OpenAI Whisper.</p>
+                    
+                    <div class="transcription-form">
+                        <div class="form-group">
+                            <label for="audio-file">Select Audio File</label>
+                            <div class="file-upload-area" id="audio-upload-area">
+                                <input type="file" id="audio-file" accept="audio/*,video/mp4" style="display: none;">
+                                <div class="upload-content">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                    <h4>Drop audio file here or click to browse</h4>
+                                    <p>Supports MP3, MP4, WAV, M4A, FLAC (max 25MB)</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="file-info" id="file-info" style="display: none;">
+                            <div class="file-details">
+                                <i class="fas fa-file-audio"></i>
+                                <span id="file-name">No file selected</span>
+                                <span id="file-size">0 MB</span>
+                            </div>
+                            <button type="button" id="remove-file" class="btn-secondary">
+                                <i class="fas fa-times"></i> Remove
+                            </button>
+                        </div>
+                        
+                        <div class="form-actions">
+                            <button id="transcribe-audio" class="btn-primary" disabled>
+                                <i class="fas fa-microphone-alt"></i> Transcribe Audio
+                            </button>
+                            <button id="download-transcript" class="btn-secondary" style="display: none;">
+                                <i class="fas fa-download"></i> Download SRT
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="transcription-result" id="transcription-result" style="display: none;">
+                        <h4><i class="fas fa-file-alt"></i> Transcription Result</h4>
+                        <div class="transcript-controls">
+                            <button id="copy-transcript" class="btn-secondary">
+                                <i class="fas fa-copy"></i> Copy Text
+                            </button>
+                            <select id="transcript-format">
+                                <option value="srt">SRT (with timestamps)</option>
+                                <option value="text">Plain Text</option>
+                            </select>
+                        </div>
+                        <div class="transcript-content">
+                            <pre id="transcript-text"></pre>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="info-box">
+                    <h5><i class="fas fa-info-circle"></i> About Audio Transcription</h5>
+                    <p>
+                        This feature uses OpenAI's Whisper model to convert speech to text with accurate timestamps.
+                        Perfect for creating subtitles, meeting notes, or extracting text from videos.
+                    </p>
+                    <ul>
+                        <li><strong>High Accuracy:</strong> State-of-the-art speech recognition</li>
+                        <li><strong>Multiple Formats:</strong> Supports most audio and video files</li>
+                        <li><strong>SRT Output:</strong> Ready-to-use subtitle format with timestamps</li>
+                        <li><strong>Fast Processing:</strong> Typical transcription takes 1-2 minutes</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- Settings Section -->
+        <section id="settings" class="section">
+            <div class="container">
+                <div class="card">
+                    <h3><i class="fas fa-cog"></i> Configuration</h3>
+                    
+                    <!-- System Status -->
+                    <div class="settings-group">
+                        <h4>System Status</h4>
+                        <div class="status-grid">
+                            <div class="status-item">
+                                <span class="status-label">API Server</span>
+                                <span id="api-status" class="status-value">Checking...</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Worker</span>
+                                <span id="worker-status" class="status-value">Checking...</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Redis</span>
+                                <span id="redis-status" class="status-value">Checking...</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Google Cloud</span>
+                                <span id="gcs-status" class="status-value">Checking...</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- API Configuration -->
+                    <div class="settings-group">
+                        <h4>API Keys</h4>
+                        <div class="form-group">
+                            <label for="openai-key">OpenAI API Key</label>
+                            <div class="input-with-icon">
+                                <input type="password" id="openai-key" placeholder="sk-...">
+                                <button class="toggle-password" data-target="openai-key">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="google-project">Google Cloud Project ID</label>
+                            <input type="text" id="google-project" placeholder="your-project-id">
+                        </div>
+                    </div>
+
+                    <!-- Video Settings -->
+                    <div class="settings-group">
+                        <h4>Video Generation</h4>
+                        <div class="form-group">
+                            <label for="video-backend">Backend</label>
+                            <select id="video-backend">
+                                <option value="google_veo">Google Veo 3 (Recommended)</option>
+                                <option value="runway">Runway ML</option>
+                                <option value="minimax">Minimax</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="max-cost-per-video">Budget Limit (per video)</label>
+                            <div class="input-with-icon">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="max-cost-per-video" min="0.50" max="100" step="0.50" value="10.00" placeholder="10.00">
+                            </div>
+                            <small class="form-help">Videos exceeding this cost will be blocked. Set to 0 to disable limit.</small>
+                        </div>
+                        
+                        <div class="info-box">
+                            <h5>📏 Video Length</h5>
+                            <p>
+                                Video length is determined automatically by prompt complexity:<br>
+                                • <strong>Simple prompts:</strong> 1-2 segments (5-10 seconds)<br>
+                                • <strong>Complex prompts:</strong> 4-6 segments (20-30+ seconds)<br>
+                                <em>Each segment is 5 seconds. More detailed prompts = more segments!</em>
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button id="save-settings" class="btn-primary">
+                            <i class="fas fa-save"></i> Save Settings
+                        </button>
+                        <button id="test-connection" class="btn-secondary">
+                            <i class="fas fa-plug"></i> Test Connection
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Downloads Section -->
+        <section id="downloads" class="section">
+            <div class="container">
+                <div class="card">
+                    <h3><i class="fas fa-download"></i> Video Downloads</h3>
+                    <div id="downloads-list" class="downloads-list">
+                        <div class="empty-state">
+                            <i class="fas fa-video"></i>
+                            <p>No completed videos yet. Generate your first video to see downloads here!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <!-- Job Details Modal -->
+    <div id="jobDetailsModal" class="modal" style="display: none;">
+        <div class="modal-content job-details-modal">
+            <span class="close">&times;</span>
+            <h2><i class="fas fa-info-circle"></i> Job Details</h2>
+            
+            <div class="job-details-tabs">
+                <button class="tab-button active" data-tab="overview">Overview</button>
+                <button class="tab-button" data-tab="logs">Logs</button>
+                <button class="tab-button" data-tab="config">Configuration</button>
+            </div>
+            
+            <div class="tab-content">
+                <div id="overview-tab" class="tab-pane active">
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Job ID:</span>
+                            <span class="detail-value" id="detailJobId">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Title:</span>
+                            <span class="detail-value" id="detailTitle">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Status:</span>
+                            <span class="detail-value" id="detailStatus">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Progress:</span>
+                            <span class="detail-value" id="detailProgress">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Created:</span>
+                            <span class="detail-value" id="detailCreated">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Started:</span>
+                            <span class="detail-value" id="detailStarted">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Finished:</span>
+                            <span class="detail-value" id="detailFinished">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Processing Time:</span>
+                            <span class="detail-value" id="detailProcessingTime">-</span>
+                        </div>
+                        <div class="detail-item full-width">
+                            <span class="detail-label">Error:</span>
+                            <span class="detail-value error-text" id="detailError">-</span>
+                        </div>
+                    </div>
+                    
+                    <div class="prompt-section">
+                        <h3>Prompt</h3>
+                        <div class="prompt-text" id="detailPrompt">-</div>
+                    </div>
+                </div>
+                
+                <div id="logs-tab" class="tab-pane">
+                    <div class="logs-container">
+                        <div class="logs-header">
+                            <h3>Execution Logs</h3>
+                            <small>Real-time logs from the video generation process</small>
+                        </div>
+                        <pre class="logs-content" id="detailLogs">Loading logs...</pre>
+                    </div>
+                </div>
+                
+                <div id="config-tab" class="tab-pane">
+                    <div class="config-container">
+                        <h3>Job Configuration</h3>
+                        <pre class="config-content" id="detailConfig">Loading configuration...</pre>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="modal-actions">
+                <button class="btn-secondary" id="closeDetailsBtn">Close</button>
+                <button class="btn-primary" id="copyJobIdBtn">
+                    <i class="fas fa-copy"></i> Copy Job ID
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

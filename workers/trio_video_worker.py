@@ -609,7 +609,7 @@ async def upload_video_to_gcs_trio(
         from workers.gcs_uploader import upload_job_artifact
         
         gcs_config = GCSConfig(
-            bucket=config.get('gcs_bucket', 'ttv-api-artifacts'),
+            bucket=config.get('gcs_bucket', os.getenv('GCS_BUCKET', 'davids-ttv-api-artifacts')),
             prefix=config.get('gcs_prefix', 'ttv-api'),
             credentials_path=config.get('credentials_path', 'credentials.json'),
             signed_url_expiration=config.get('signed_url_expiration', 3600)

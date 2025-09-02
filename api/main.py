@@ -355,10 +355,13 @@ def setup_routes(app: FastAPI):
     """Configure application routes"""
     
     # Import route modules
-    from api.routes import jobs, health
+    from api.routes import jobs, health, transcription
     
     # Include job management routes
     app.include_router(jobs.router, prefix="/jobs")
+    
+    # Include transcription routes
+    app.include_router(transcription.router, prefix="/transcription")
     
     # Include health and monitoring routes  
     app.include_router(health.router)

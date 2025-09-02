@@ -6,3 +6,8 @@ Supports HTTP/3 end-to-end with structured concurrency and job queuing.
 """
 
 __version__ = "1.0.0"
+
+# Import the FastAPI app to make it available as api:app
+from api.main import app
+
+__all__ = ["app"]

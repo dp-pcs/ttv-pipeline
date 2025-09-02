@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     # API Server dependencies
     "fastapi>=0.104.0",
+    "python-multipart>=0.0.5",
     "hypercorn[h3]>=0.16.0",
     "uvloop>=0.19.0",
     "pydantic>=2.5.0",

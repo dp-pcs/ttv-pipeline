@@ -23,8 +23,13 @@ class JobCreateRequest(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=2000,
+        max_length=8000,
         description="Text prompt for video generation"
+    )
+    title: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Optional custom title for the job"
     )
     
     @field_validator('prompt')
@@ -54,6 +59,8 @@ class JobStatusResponse(BaseModel):
     finished_at: Optional[datetime] = Field(None, description="Job completion timestamp")
     gcs_uri: Optional[str] = Field(None, description="GCS URI of generated video (when finished)")
     error: Optional[str] = Field(None, description="Error message (when failed)")
+    title: Optional[str] = Field(None, description="Custom job title")
+    prompt: Optional[str] = Field(None, description="Original prompt text")
 
 
 class ArtifactResponse(BaseModel):
@@ -82,6 +89,50 @@ class JobCancelResponse(BaseModel):
     status: JobStatus = Field(..., description="Job status after cancellation request")
     message: str = Field(..., description="Cancellation status message")
 
+
+class JobEstimateRequest(BaseModel):
+    """Request model for job cost estimation"""
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=8000,
+        description="Text prompt for video generation"
+    )
+    title: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Optional custom title for the job"
+    )
+
+
+class JobEstimateResponse(BaseModel):
+    """Response model for job cost estimation"""
+    prompt: str = Field(..., description="Original prompt")
+    title: Optional[str] = Field(None, description="Custom job title")
+    estimated_segments: int = Field(..., description="Number of video segments that will be generated")
+    segment_duration: float = Field(..., description="Duration per segment in seconds")
+    total_duration: float = Field(..., description="Total estimated video duration in seconds")
+    cost_per_segment: float = Field(..., description="Cost per individual segment in USD")
+    total_estimated_cost: float = Field(..., description="Total estimated cost in USD")
+    backend: str = Field(..., description="Video generation backend that will be used")
+    reasoning: Optional[str] = Field(None, description="AI reasoning for segment count")
+
+
+class JobDetailsResponse(BaseModel):
+    """Detailed job information response model"""
+    id: str = Field(..., description="Unique job identifier")
+    title: Optional[str] = Field(None, description="Custom job title")
+    prompt: str = Field(..., description="Original prompt text")
+    status: JobStatus = Field(..., description="Current job status")
+    progress: int = Field(..., description="Job progress percentage")
+    created_at: datetime = Field(..., description="Job creation timestamp")
+    started_at: Optional[datetime] = Field(None, description="Job start timestamp")
+    finished_at: Optional[datetime] = Field(None, description="Job completion timestamp")
+    gcs_uri: Optional[str] = Field(None, description="GCS URI of generated video")
+    error: Optional[str] = Field(None, description="Error message if job failed")
+    config: Dict[str, Any] = Field(..., description="Job configuration parameters")
+    logs: List[str] = Field(..., description="Execution logs and messages")
+    processing_time: Optional[float] = Field(None, description="Total processing time in seconds")
 
 class ErrorResponse(BaseModel):
     """Standard error response model"""
@@ -151,6 +202,7 @@ class JobData(BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     prompt: str
+    title: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
     gcs_uri: Optional[str] = None
     error: Optional[str] = None
@@ -166,7 +218,33 @@ class JobData(BaseModel):
             started_at=self.started_at,
             finished_at=self.finished_at,
             gcs_uri=self.gcs_uri,
-            error=self.error
+            error=self.error,
+            title=self.title,
+            prompt=self.prompt
+        )
+    
+    def to_details_response(self) -> JobDetailsResponse:
+        """Convert to detailed job information response"""
+        processing_time = None
+        if self.started_at and self.finished_at:
+            processing_time = (self.finished_at - self.started_at).total_seconds()
+        elif self.started_at:
+            processing_time = (datetime.now(timezone.utc) - self.started_at).total_seconds()
+            
+        return JobDetailsResponse(
+            id=self.id,
+            title=self.title,
+            prompt=self.prompt,
+            status=self.status,
+            progress=self.progress,
+            created_at=self.created_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
+            gcs_uri=self.gcs_uri,
+            error=self.error,
+            config=self.config,
+            logs=self.logs,
+            processing_time=processing_time
         )
     
     def add_log(self, message: str, max_logs: int = 1000):

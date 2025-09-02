@@ -45,6 +45,10 @@ services:
       - ./generators:/app/generators:ro
       # Development configuration
       - ./api_config.dev.yaml:/app/api_config.yaml:ro
+    command: >
+      python -m rq.cli worker 
+      --url redis://redis:6379 
+      video_generation
     deploy:
       replicas: 1
     profiles:

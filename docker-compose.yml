@@ -41,6 +41,8 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - GCS_BUCKET=${GCS_BUCKET:-ttv-api-artifacts}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/credentials/credentials.json}
+      - GCS_CREDENTIALS_PATH=${GCS_CREDENTIALS_PATH:-/app/credentials/credentials.json}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -75,7 +77,8 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - GCS_BUCKET=${GCS_BUCKET:-ttv-api-artifacts}
-      - GCS_CREDENTIALS_PATH=/app/credentials/gcs-key.json
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/credentials/credentials.json}
+      - GCS_CREDENTIALS_PATH=${GCS_CREDENTIALS_PATH:-/app/credentials/credentials.json}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-1}

@@ -64,7 +64,7 @@ class GCSConfig(BaseModel):
 class SecurityConfig(BaseModel):
     """Security configuration"""
     auth_token: Optional[str] = Field(default=None, description="Bearer token for authentication")
-    rate_limit_per_minute: int = Field(default=60, description="Rate limit per minute per client")
+    rate_limit_per_minute: int = Field(default=300, description="Rate limit per minute per client")
     
     @field_validator('rate_limit_per_minute')
     @classmethod
