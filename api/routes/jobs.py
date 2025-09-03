@@ -178,19 +178,7 @@ async def list_jobs(
     # Get jobs list from queue
     jobs = job_queue.list_jobs(limit=limit, offset=offset)
     
-    return [
-        JobStatusResponse(
-            id=job.id,
-            status=job.status,
-            progress=job.progress,
-            created_at=job.created_at,
-            started_at=job.started_at,
-            finished_at=job.finished_at,
-            gcs_uri=job.gcs_uri,
-            error=job.error
-        )
-        for job in jobs
-    ]
+    return [job.to_status_response() for job in jobs]
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
