@@ -1,6 +1,6 @@
-# TTV Pipeline
+# VisionWeave
 
-An end-to-end pipeline for generating high-quality long-form videos from text prompts.
+An advanced AI platform for generating high-quality long-form videos from text prompts with integrated audio transcription capabilities.
 
 ## Overview
 
@@ -33,6 +33,66 @@ The pipeline now supports remote video generation APIs, making high-quality vide
 - **Comprehensive Generator Architecture**: Extensible factory pattern with automatic fallback support
 
 See the "Configuration" section for details on setting up different backends.
+
+## 🌟 Key Features
+
+- **🎬 Video Generation**: Create stunning long-form videos from text prompts
+- **🎙️ Audio Transcription**: Convert speech to text with OpenAI Whisper integration  
+- **🖥️ Modern Web Interface**: Professional Next.js frontend with real-time monitoring
+- **🔄 Multiple Backends**: Support for Google Veo 3, Runway ML, and Minimax
+- **📊 Real-time Dashboard**: Monitor job progress with live updates
+- **💰 Cost Estimation**: Preview costs before generating videos
+- **🎯 Smart Segmentation**: AI-powered prompt analysis for optimal video segments
+- **📱 Responsive Design**: Works seamlessly on desktop and mobile devices
+- **⚙️ Settings Management**: Easy configuration of API keys and preferences
+- **🔒 Secure Downloads**: Protected video and transcript downloads
+
+## 🚀 Quick Start
+
+### Option 1: Full System with Modern Frontend (Recommended)
+
+Run both the API backend and the new Next.js frontend:
+
+```bash
+# Terminal 1: Start backend services
+make dev
+
+# Terminal 2: Start the frontend (in a new terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+This gives you:
+- **VisionWeave API backend** on `http://localhost:8000`
+- **Modern Next.js frontend** on `http://localhost:3000`
+- Real-time job monitoring and progress tracking
+- Audio transcription with OpenAI Whisper
+- Cost estimation before video generation
+- Secure video downloads from private GCS buckets
+
+### Option 2: API-Only Setup
+
+For headless operation or custom integrations:
+
+```bash
+# Development setup
+make dev
+
+# Production setup  
+make prod
+```
+
+### Frontend Features
+
+The new VisionWeave frontend provides:
+
+- **📱 Responsive Design**: Works on desktop and mobile
+- **🎬 Video Generation**: Intuitive prompt entry with cost preview
+- **🎙️ Audio Transcription**: Drag & drop audio files for SRT generation
+- **📊 Real-time Dashboard**: Live job progress and status monitoring
+- **⚙️ Settings Management**: Easy API key and backend configuration
+- **💾 Download Manager**: Secure video and transcript downloads
 
 ## System Architecture
 

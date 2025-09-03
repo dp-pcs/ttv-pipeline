@@ -1,0 +1,185 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 90%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+
+    /* Custom Metallic Colors */
+    --metallic-silver: 0 0% 80%;
+    --metallic-chrome: 0 0% 75%;
+    --metallic-gold: 45 100% 70%;
+    --metallic-copper: 25 100% 65%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  .metallic-gradient {
+    background: linear-gradient(135deg, 
+      hsl(var(--metallic-silver)) 0%, 
+      hsl(var(--metallic-chrome)) 50%, 
+      hsl(var(--metallic-silver)) 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .metallic-border {
+    border: 1px solid hsl(var(--metallic-chrome));
+    box-shadow: 0 0 20px hsla(var(--metallic-silver), 0.1);
+  }
+
+  .metallic-glow {
+    box-shadow: 0 0 30px hsla(var(--metallic-gold), 0.2);
+  }
+
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .loading-shimmer {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.1),
+      transparent
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  .page-transition {
+    animation: fadeInUp 0.5s ease-out;
+  }
+
+  .job-status-pending {
+    @apply text-yellow-400 border-yellow-400/20 bg-yellow-400/5;
+  }
+
+  .job-status-processing {
+    @apply text-blue-400 border-blue-400/20 bg-blue-400/5;
+  }
+
+  .job-status-completed {
+    @apply text-green-400 border-green-400/20 bg-green-400/5;
+  }
+
+  .job-status-failed {
+    @apply text-red-400 border-red-400/20 bg-red-400/5;
+  }
+
+  .job-status-cancelled {
+    @apply text-gray-400 border-gray-400/20 bg-gray-400/5;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 20px hsla(var(--metallic-gold), 0.2);
+  }
+  50% {
+    box-shadow: 0 0 40px hsla(var(--metallic-gold), 0.4);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--metallic-chrome));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--metallic-silver));
+}
+
+/* Focus styles */
+.focus-visible:focus-visible {
+  outline: 2px solid hsl(var(--metallic-gold));
+  outline-offset: 2px;
+}
+
+/* Custom button variants */
+.btn-metallic {
+  @apply bg-gradient-to-r from-slate-800 to-slate-700 hover:from-slate-700 hover:to-slate-600 
+         text-white border border-slate-600 hover:border-slate-500 
+         shadow-lg hover:shadow-xl transition-all duration-200;
+}
+
+.btn-metallic:hover {
+  box-shadow: 0 10px 30px hsla(var(--metallic-silver), 0.2);
+}
+
+.btn-gold {
+  @apply bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400
+         text-black font-semibold border border-yellow-500 hover:border-yellow-400
+         shadow-lg hover:shadow-xl transition-all duration-200;
+}
+
+.btn-gold:hover {
+  box-shadow: 0 10px 30px hsla(var(--metallic-gold), 0.3);
+}
