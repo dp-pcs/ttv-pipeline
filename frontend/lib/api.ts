@@ -26,14 +26,9 @@ class VisionWeaveAPI {
       delete headers['Content-Type'];
     }
 
-    const defaultOptions: RequestInit = {
+    const response = await fetch(url, {
       ...options,
       headers,
-    };
-
-    const response = await fetch(url, {
-      ...defaultOptions,
-      ...options,
     });
 
     if (!response.ok) {
