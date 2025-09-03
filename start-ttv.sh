@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# TTV Pipeline Launcher Script
-# Simple script to start the TTV Pipeline system
+# VisionWeave Launcher Script
+# Complete launcher script for the VisionWeave AI Video Generation Platform
+# Starts backend API services and modern Next.js frontend
 
 set -e
 
@@ -110,11 +111,69 @@ start_services() {
     fi
 }
 
+# Function to start the frontend
+start_frontend() {
+    print_status "Starting VisionWeave Frontend..."
+    
+    # Check if Node.js is installed
+    if ! command_exists node; then
+        print_error "Node.js is not installed. Please install Node.js 18+ from https://nodejs.org"
+        return 1
+    fi
+    
+    # Check if npm is installed
+    if ! command_exists npm; then
+        print_error "npm is not installed. Please install Node.js from https://nodejs.org"
+        return 1
+    fi
+    
+    # Navigate to frontend directory
+    cd frontend
+    
+    # Install dependencies if node_modules doesn't exist
+    if [ ! -d "node_modules" ]; then
+        print_status "Installing frontend dependencies (this may take a few minutes)..."
+        npm install --legacy-peer-deps
+    fi
+    
+    # Start the development server in background
+    print_status "Starting Next.js development server..."
+    npm run dev > ../frontend.log 2>&1 &
+    local frontend_pid=$!
+    echo $frontend_pid > ../frontend.pid
+    
+    # Go back to root directory
+    cd ..
+    
+    # Wait for frontend to be ready
+    print_status "Waiting for frontend to be ready..."
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if curl -s http://localhost:3000 >/dev/null 2>&1; then
+            print_success "Frontend is ready!"
+            break
+        else
+            print_status "Waiting for frontend... (attempt $attempt/$max_attempts)"
+            sleep 2
+            ((attempt++))
+        fi
+    done
+    
+    if [ $attempt -gt $max_attempts ]; then
+        print_error "Frontend failed to start. Check logs: cat frontend.log"
+        return 1
+    fi
+    
+    return 0
+}
+
 # Function to open the frontend
 open_frontend() {
-    local frontend_url="file://$(pwd)/frontend/launcher.html"
+    local frontend_url="http://localhost:3000"
     
-    print_status "Opening TTV Pipeline Frontend..."
+    print_status "Opening VisionWeave Frontend..."
     
     # Detect OS and open browser
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -164,9 +223,20 @@ show_status() {
 
 # Function to stop services
 stop_services() {
-    print_status "Stopping TTV Pipeline services..."
+    print_status "Stopping VisionWeave services..."
+    
+    # Stop frontend if running
+    if [ -f "frontend.pid" ]; then
+        local frontend_pid=$(cat frontend.pid)
+        print_status "Stopping frontend server (PID: $frontend_pid)..."
+        kill $frontend_pid 2>/dev/null || true
+        rm -f frontend.pid
+        rm -f frontend.log
+    fi
+    
+    # Stop backend services
     docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev down
-    print_success "Services stopped"
+    print_success "All services stopped"
 }
 
 # Function to show logs
@@ -199,13 +269,14 @@ update_system() {
 
 # Function to show help
 show_help() {
-    echo "TTV Pipeline Launcher"
+    echo "VisionWeave AI Video Generation Platform"
+    echo "Complete launcher for backend services and Next.js frontend"
     echo
     echo "Usage: $0 [command]"
     echo
     echo "Commands:"
-    echo "  start     Start the TTV Pipeline system (default)"
-    echo "  stop      Stop all services"
+    echo "  start     Start VisionWeave (backend + frontend) - default"
+    echo "  stop      Stop all services (backend + frontend)"
     echo "  restart   Restart all services"
     echo "  status    Show system status"
     echo "  logs      Show service logs"
@@ -213,10 +284,15 @@ show_help() {
     echo "  help      Show this help message"
     echo
     echo "Examples:"
-    echo "  $0              # Start system and open frontend"
-    echo "  $0 start        # Start system only"
+    echo "  $0              # Start full system and open browser"
+    echo "  $0 start        # Start backend + frontend"
     echo "  $0 status       # Check system status"
     echo "  $0 logs         # View logs"
+    echo
+    echo "Access Points:"
+    echo "  Frontend:  http://localhost:3000"
+    echo "  API:       http://localhost:8000"
+    echo "  API Docs:  http://localhost:8000/docs"
 }
 
 # Main execution
@@ -227,12 +303,14 @@ main() {
         "start")
             check_docker
             start_services
+            start_frontend
             open_frontend
-            print_success "TTV Pipeline is ready!"
+            print_success "VisionWeave is ready!"
             echo
-            echo "🎬 Frontend: file://$(pwd)/frontend/launcher.html"
+            echo "🎬 Frontend: http://localhost:3000"
             echo "🔗 API Docs: http://localhost:8000/docs"
             echo "📊 Health: http://localhost:8000/healthz"
+            echo "🔥 Backend API: http://localhost:8000"
             echo
             echo "Run '$0 stop' to stop the system"
             echo "Run '$0 logs' to view logs"
