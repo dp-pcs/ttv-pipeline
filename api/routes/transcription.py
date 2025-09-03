@@ -18,12 +18,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["transcription"])
 
+def _srt_to_plain_text(srt_content: str) -> str:
+    """Convert SRT format to plain text by removing timestamps and numbering."""
+    if not srt_content:
+        return ""
+    
+    lines = srt_content.strip().split('\n')
+    text_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # Skip empty lines, sequence numbers, and timestamp lines
+        if (not line or 
+            line.isdigit() or 
+            '-->' in line or
+            (len(line.split()) == 1 and line.replace(':', '').replace(',', '').replace('.', '').isdigit())):
+            continue
+        text_lines.append(line)
+    
+    return ' '.join(text_lines)
+
 class TranscriptionResponse(BaseModel):
     """Response model for transcription results"""
-    text: str
-    format: str = "srt"
-    filename: str
+    srt_content: str
+    plain_text: str
     duration: Optional[float] = None
+    language: Optional[str] = None
 
 @router.post("/upload", response_model=TranscriptionResponse)
 async def transcribe_audio(
@@ -105,12 +125,18 @@ async def transcribe_audio(
             )
         
         logger.info(f"Successfully transcribed {file.filename}")
+        logger.info(f"Transcript content length: {len(str(transcript))}")
+        logger.info(f"Transcript preview: {str(transcript)[:200]}...")
+        
+        # Convert SRT to plain text by removing timestamps
+        srt_content = str(transcript)
+        plain_text = _srt_to_plain_text(srt_content)
         
         return TranscriptionResponse(
-            text=transcript,
-            format="srt",
-            filename=file.filename or "audio",
-            duration=None  # Could calculate from file if needed
+            srt_content=srt_content,
+            plain_text=plain_text,
+            duration=None,  # Could calculate from file if needed
+            language=None   # Could be detected by Whisper
         )
         
     except openai.APIError as e:
