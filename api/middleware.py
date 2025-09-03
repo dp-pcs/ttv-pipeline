@@ -416,13 +416,23 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
         # Validate content type for POST/PUT requests
         if request.method in ["POST", "PUT", "PATCH"]:
             content_type = request.headers.get("content-type", "")
-            if not content_type.startswith("application/json"):
+            
+            # Allow multipart/form-data for file upload endpoints
+            file_upload_endpoints = ["/transcription/upload"]
+            is_file_upload = any(request.url.path.startswith(endpoint) for endpoint in file_upload_endpoints)
+            
+            if not (content_type.startswith("application/json") or 
+                   (is_file_upload and content_type.startswith("multipart/form-data"))):
                 correlation_id = getattr(request.state, 'correlation_id', None)
                 
+                supported_types = ["application/json"]
+                if is_file_upload:
+                    supported_types.append("multipart/form-data")
+                
                 media_type_error = UnsupportedMediaTypeError(
-                    message="Content-Type must be application/json",
+                    message="Content-Type must be application/json" + (" or multipart/form-data for file uploads" if is_file_upload else ""),
                     provided_type=content_type,
-                    supported_types=["application/json"]
+                    supported_types=supported_types
                 ).with_correlation_id(correlation_id)
                 
                 logger.warning(
@@ -432,7 +442,7 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
                             'event': 'unsupported_media_type',
                             'correlation_id': correlation_id,
                             'provided_type': content_type,
-                            'supported_types': ["application/json"],
+                            'supported_types': supported_types,
                             'method': request.method,
                             'path': request.url.path
                         }
