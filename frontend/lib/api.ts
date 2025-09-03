@@ -49,7 +49,16 @@ class VisionWeaveAPI {
   }
 
   async getReadinessStatus(): Promise<ApiStatus> {
-    return this.request('/readyz');
+    const response = await this.request('/readyz');
+    
+    // Transform backend response format to frontend expected format
+    const components = response.components || {};
+    return {
+      api: components.api === 'healthy',
+      worker: components.workers === 'healthy', // Note: backend uses "workers", frontend expects "worker"
+      redis: components.redis === 'healthy',
+      gcs: components.gcs === 'healthy'
+    };
   }
 
   // Job Management
