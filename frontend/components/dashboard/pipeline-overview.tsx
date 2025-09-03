@@ -54,16 +54,6 @@ export function PipelineOverview() {
       </CardHeader>
       <CardContent>
         <div className="space-y-8">
-          {/* Pipeline Diagram */}
-          <div className="relative w-full h-48 rounded-lg overflow-hidden bg-gradient-to-br from-background/50 to-muted/50 border border-border">
-            <Image
-              src="/assets/visionweave_pipeline.png"
-              alt="VisionWeave Pipeline Process"
-              fill
-              className="object-contain p-4"
-            />
-          </div>
-
           {/* Process Steps */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {pipelineSteps.map((step, index) => {
