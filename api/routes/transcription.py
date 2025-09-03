@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/transcription", tags=["transcription"])
+router = APIRouter(tags=["transcription"])
 
 class TranscriptionResponse(BaseModel):
     """Response model for transcription results"""
