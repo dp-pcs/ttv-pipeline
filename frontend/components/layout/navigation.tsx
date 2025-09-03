@@ -56,10 +56,10 @@ export function Navigation() {
     <>
       <nav className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex h-20 items-center justify-between">
+          <div className="flex h-40 items-center justify-between">
             {/* Logo */}
-            <Link href="/" className="flex items-center space-x-4 group">
-              <div className="relative w-16 h-16 rounded-xl overflow-hidden bg-black shadow-lg">
+            <Link href="/" className="flex items-center space-x-6 group">
+              <div className="relative w-32 h-32 rounded-2xl overflow-hidden bg-black shadow-2xl border-2 border-gray-500">
                 <Image
                   src="/assets/visionweave_logo.png"
                   alt="VisionWeave Logo"
@@ -67,7 +67,7 @@ export function Navigation() {
                   className="object-contain group-hover:scale-105 transition-transform duration-300"
                 />
               </div>
-              <span className="hidden sm:block text-2xl font-bold metallic-gradient">
+              <span className="hidden sm:block text-4xl font-bold metallic-gradient">
                 VisionWeave
               </span>
             </Link>
