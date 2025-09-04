@@ -68,13 +68,13 @@ export function PipelineOverview() {
                   )}
                   
                   <Card className={`transition-all duration-200 hover:scale-105 ${step.borderColor} ${step.bgColor}`}>
-                    <CardContent className="p-4 text-center space-y-3">
+                    <CardContent className="p-4 text-center h-40 flex flex-col justify-between">
                       <div className={`w-12 h-12 rounded-full ${step.bgColor} ${step.borderColor} border flex items-center justify-center mx-auto`}>
                         <Icon className={`w-6 h-6 ${step.color}`} />
                       </div>
-                      <div>
+                      <div className="flex-1 flex flex-col justify-center space-y-2">
                         <h4 className="font-semibold text-sm">{step.title}</h4>
-                        <p className="text-xs text-muted-foreground mt-1">
+                        <p className="text-xs text-muted-foreground">
                           {step.description}
                         </p>
                       </div>
