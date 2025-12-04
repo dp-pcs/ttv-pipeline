@@ -78,6 +78,9 @@ class RunwayMLGenerator(VideoGeneratorInterface):
             ],
             "supports_image_to_video": True,
             "supports_text_to_video": False,  # Only image-to-video supported
+            "supports_first_last_frame": False,  # Runway doesn't support FLF interpolation
+            "supports_video_extension": False,
+            "supports_reference_images": False,
             "requires_gpu": False,  # API-based
             "api_based": True,
             "models": {

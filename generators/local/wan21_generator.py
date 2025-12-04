@@ -42,6 +42,9 @@ class Wan21Generator(VideoGeneratorInterface):
             "supported_resolutions": ["1280*720", "1024*576", "720*480"],
             "supports_image_to_video": True,
             "supports_text_to_video": False,  # Pure text-to-video not used in pipeline
+            "supports_first_last_frame": self.flf2v_model_dir is not None,  # FLF2V model support
+            "supports_video_extension": False,
+            "supports_reference_images": False,
             "requires_gpu": True,
             "api_based": False,
             "models": {
@@ -88,9 +91,19 @@ class Wan21Generator(VideoGeneratorInterface):
                       input_image_path: str,
                       output_path: str,
                       duration: float = 5.0,
+                      end_image_path: str = None,
                       **kwargs) -> str:
         """
-        Generate video using Wan2.1 I2V model
+        Generate video using Wan2.1 I2V or FLF2V model
+        
+        Args:
+            prompt: Text prompt describing the desired video
+            input_image_path: Path to the input/reference image (first frame)
+            output_path: Path where the generated video should be saved
+            duration: Desired duration of the video in seconds
+            end_image_path: Optional path to the last frame for FLF2V mode.
+                           When provided, uses FLF2V model to interpolate between frames.
+            **kwargs: Additional parameters (sample_steps, guide_scale, etc.)
         
         This wraps the existing pipeline functionality for consistency
         with the new interface.

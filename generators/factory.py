@@ -90,7 +90,7 @@ def create_video_generator(backend: str, config: Dict[str, Any]) -> VideoGenerat
                 raise VideoGenerationError("Runway ML API key is required but not provided")
                 
         elif backend == "veo3":
-            # Google Veo 3 configuration
+            # Google Veo 3.1 configuration
             veo_config = config.get("google_veo", {})
             remote_settings = config.get("remote_api_settings", {})
             
@@ -102,11 +102,14 @@ def create_video_generator(backend: str, config: Dict[str, Any]) -> VideoGenerat
                 "max_retries": remote_settings.get("max_retries", 3),
                 "polling_interval": remote_settings.get("polling_interval", 15),
                 "timeout": remote_settings.get("timeout", 600),
+                # Veo 3.1 specific settings
+                "veo_model": config.get("veo_model", "veo-3.1-generate-preview"),
+                "video_aspect_ratio": config.get("video_aspect_ratio", "16:9"),
             }
             
             if not backend_config["project_id"]:
                 raise VideoGenerationError(
-                    "Google Veo 3 requires a project ID"
+                    "Google Veo 3.1 requires a project ID"
                 )
         
         elif backend == "minimax":

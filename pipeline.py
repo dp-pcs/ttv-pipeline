@@ -579,7 +579,11 @@ def generate_video_segments_single_keyframe(
     output_dir: str
 ) -> List[str]:
     """
-    Generate video segments using single keyframe for I2V generation (e.g., Veo3).
+    Generate video segments using keyframes for I2V or FLF generation.
+    
+    For backends that support First-Last-Frame (FLF) interpolation (like Veo 3.1),
+    this function will automatically use both first and last frames when available.
+    For backends that only support I2V, it falls back to single keyframe mode.
 
     Args:
         config: Configuration dictionary
@@ -596,7 +600,7 @@ def generate_video_segments_single_keyframe(
 
     # Get the video generation backend
     backend = config.get('default_video_generation_backend', 'veo3')
-    logging.info(f"Using {backend} for single-keyframe video generation")
+    logging.info(f"Using {backend} for video generation")
 
     # Get segment duration
     segment_duration = config.get('segment_duration_seconds', 5.0)
@@ -604,6 +608,9 @@ def generate_video_segments_single_keyframe(
     # Get I2I mode configuration
     i2i_config = config.get('i2i_mode', {})
     keyframe_position = i2i_config.get('keyframe_position', 'first')
+    
+    # Check if FLF mode is explicitly enabled in config
+    use_flf_mode = config.get('use_first_last_frame', True)  # Default to True for FLF-capable backends
 
     # Use consistent directory structure with other functions
     frames_dir = os.path.join(output_dir, "frames")
@@ -615,58 +622,103 @@ def generate_video_segments_single_keyframe(
 
     # Ensure we're using absolute paths for keyframe files
     frames_dir_abs = os.path.abspath(frames_dir)
-    logging.info(f"Absolute frames directory path for single-keyframe mode: {frames_dir_abs}")
+    logging.info(f"Absolute frames directory path: {frames_dir_abs}")
+    
+    # Create video generator once and check its capabilities
+    generator = factory.create_video_generator(backend, config)
+    capabilities = generator.get_capabilities()
+    supports_flf = capabilities.get('supports_first_last_frame', False)
+    
+    if supports_flf and use_flf_mode:
+        logging.info(f"Backend {backend} supports First-Last-Frame (FLF) interpolation mode")
+        # FLF mode requires 8 second duration for Veo 3.1
+        flf_constraints = capabilities.get('flf_constraints', {})
+        required_duration = flf_constraints.get('required_duration', 8)
+        if segment_duration != required_duration:
+            logging.info(f"FLF mode requires {required_duration}s duration, adjusting from {segment_duration}s")
+            segment_duration = required_duration
+    else:
+        logging.info(f"Using single-keyframe I2V mode (FLF support: {supports_flf}, FLF enabled: {use_flf_mode})")
 
     for prompt_item in video_prompts:
         seg, prompt_text = prompt_item["segment"], prompt_item["prompt"]
 
-        # Select the keyframe based on position setting
-        if keyframe_position == 'first' and 'first_frame' in prompt_item:
-            keyframe_path = prompt_item['first_frame']
-        elif keyframe_position == 'last' and 'last_frame' in prompt_item:
-            keyframe_path = prompt_item['last_frame']
-        elif keyframe_position == 'middle':
-            # For middle, use first frame if available (could be enhanced later)
-            keyframe_path = prompt_item.get('first_frame', prompt_item.get('last_frame'))
-        else:
-            # Default to first frame
-            keyframe_path = prompt_item.get('first_frame', prompt_item.get('last_frame'))
-
-        # Fix keyframe path to use absolute path
-        if keyframe_path:
-            if keyframe_path == 'provided_start_image.png':
-                # This should be segment_00.png
-                keyframe_path = os.path.join(frames_dir_abs, 'segment_00.png')
-            elif keyframe_path.startswith('segment_') and keyframe_path.endswith('.png'):
-                # Convert relative segment reference to absolute path
-                keyframe_path = os.path.join(frames_dir_abs, keyframe_path)
+        # Get first and last frame paths from prompt item
+        first_frame_ref = prompt_item.get('first_frame')
+        last_frame_ref = prompt_item.get('last_frame')
+        
+        # Resolve first frame path
+        first_frame_path = None
+        if first_frame_ref:
+            if first_frame_ref == 'provided_start_image.png':
+                first_frame_path = os.path.join(frames_dir_abs, 'segment_00.png')
+            elif first_frame_ref.startswith('segment_') and first_frame_ref.endswith('.png'):
+                first_frame_path = os.path.join(frames_dir_abs, first_frame_ref)
             else:
-                # For any other reference, try to resolve it
-                keyframe_path = os.path.join(frames_dir_abs, keyframe_path)
+                first_frame_path = os.path.join(frames_dir_abs, first_frame_ref)
+        
+        # Resolve last frame path
+        last_frame_path = None
+        if last_frame_ref:
+            if last_frame_ref.startswith('segment_') and last_frame_ref.endswith('.png'):
+                last_frame_path = os.path.join(frames_dir_abs, last_frame_ref)
+            else:
+                last_frame_path = os.path.join(frames_dir_abs, last_frame_ref)
+        
+        # Determine which mode to use for this segment
+        use_flf_for_segment = (
+            supports_flf and 
+            use_flf_mode and 
+            first_frame_path and 
+            last_frame_path and
+            os.path.exists(first_frame_path) and 
+            os.path.exists(last_frame_path) and
+            first_frame_path != last_frame_path  # Don't use FLF if same frame
+        )
+        
+        # Select the primary keyframe based on position setting (for I2V fallback)
+        if keyframe_position == 'first' and first_frame_path:
+            keyframe_path = first_frame_path
+        elif keyframe_position == 'last' and last_frame_path:
+            keyframe_path = last_frame_path
+        else:
+            keyframe_path = first_frame_path or last_frame_path
 
         if not keyframe_path:
             logging.error(f"No keyframe found for segment {seg}")
             continue
 
-        logging.info(f"Generating video for segment {seg} using keyframe: {keyframe_path}")
+        if use_flf_for_segment:
+            logging.info(f"Generating video for segment {seg} using FLF mode:")
+            logging.info(f"  First frame: {first_frame_path}")
+            logging.info(f"  Last frame:  {last_frame_path}")
+        else:
+            logging.info(f"Generating video for segment {seg} using single keyframe: {keyframe_path}")
 
         try:
-            # Create video generator
-            generator = factory.create_video_generator(backend, config)
-
-            # Generate video from single keyframe
+            # Generate video file path
             video_file = os.path.join(output_dir, f"segment_{seg:03d}.mp4")
 
-            # Call generator's generate_video method
-            generator.generate_video(
-                prompt=prompt_text,
-                input_image_path=keyframe_path,
-                output_path=video_file,
-                duration=segment_duration
-            )
+            # Call generator's generate_video method with FLF support
+            if use_flf_for_segment:
+                generator.generate_video(
+                    prompt=prompt_text,
+                    input_image_path=first_frame_path,
+                    output_path=video_file,
+                    duration=segment_duration,
+                    end_image_path=last_frame_path  # FLF interpolation!
+                )
+            else:
+                generator.generate_video(
+                    prompt=prompt_text,
+                    input_image_path=keyframe_path,
+                    output_path=video_file,
+                    duration=segment_duration
+                )
 
             video_paths.append(video_file)
-            logging.info(f"Generated video segment {seg}: {video_file}")
+            mode_str = "FLF" if use_flf_for_segment else "I2V"
+            logging.info(f"Generated video segment {seg} ({mode_str}): {video_file}")
 
         except (InvalidInputError, GenerationError) as e:
             logging.error(f"Failed to generate video for segment {seg}: {e}")

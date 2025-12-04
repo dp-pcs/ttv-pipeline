@@ -75,6 +75,9 @@ class MinimaxGenerator(VideoGeneratorInterface):
             "supported_formats": ["mp4"],
             "supports_image_to_video": True,
             "supports_text_to_video": False,
+            "supports_first_last_frame": False,  # Minimax doesn't support FLF
+            "supports_video_extension": False,
+            "supports_reference_images": False,
             "requires_gpu": False,
             "api_based": True,
             "supports_camera_movements": True,

@@ -148,11 +148,36 @@ prompt_enhancement_model: o4-mini
 video_aspect_ratio: "16:9"  # Default to widescreen landscape
 
 # ============================================================================
+# VEO 3.1 FIRST-LAST-FRAME (FLF) CONFIGURATION
+# ============================================================================
+
+# Enable First-Last-Frame interpolation mode for Veo 3.1
+# When enabled, Veo 3.1 will generate video that smoothly transitions between
+# the first and last keyframe images, providing better visual continuity.
+# Requires: veo-3.1-generate-preview or veo-3.1-fast-generate-preview model
+use_first_last_frame: true
+
+# Veo model selection (for google_veo backend)
+# Options:
+# - "veo-3.1-generate-preview" (default) - Full quality with FLF, extension, reference images
+# - "veo-3.1-fast-generate-preview" - Faster generation with same features
+# - "veo-3.0-generate-001" - Stable Veo 3 (no FLF support)
+# - "veo-3.0-fast-generate-001" - Fast Veo 3
+# - "veo-2.0-generate-001" - Legacy Veo 2
+veo_model: "veo-3.1-generate-preview"
+
+# Video resolution for Veo 3.1
+# - "720p" (default) - Standard HD
+# - "1080p" - Full HD (only available for 8 second videos)
+veo_resolution: "720p"
+
+# ============================================================================
 # GENERATION PARAMETERS
 # ============================================================================
 
 # Video generation parameters (applies to all backends)
-segment_duration_seconds: 5.0 # Desired duration for each video segment in seconds
+# Note: For Veo 3.1 FLF mode, duration is automatically set to 8 seconds
+segment_duration_seconds: 8.0 # Desired duration for each video segment in seconds
 frame_num: 81         # Number of frames (for ~5 seconds at 16fps)
 sample_steps: 40      # Sampling steps
 sample_shift: 5.0     # Sampling shift factor

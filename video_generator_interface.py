@@ -3,7 +3,12 @@ Video Generator Interface
 
 This module defines the abstract interface for video generation backends,
 enabling seamless switching between local models (like Wan2.1) and remote
-APIs (like Runway ML and Google Veo 3).
+APIs (like Runway ML and Google Veo 3.1).
+
+Supported generation modes:
+- Image-to-Video (I2V): Generate video from a single starting image
+- First-Last-Frame (FLF): Interpolate between first and last frame images
+- Text-to-Video (T2V): Generate video from text prompt only (backend-dependent)
 """
 
 from abc import ABC, abstractmethod
@@ -29,16 +34,26 @@ class VideoGeneratorInterface(ABC):
                       input_image_path: str,
                       output_path: str,
                       duration: float = 5.0,
+                      end_image_path: str = None,
                       **kwargs) -> str:
         """
         Generate a video segment
         
         Args:
             prompt: Text prompt describing the desired video
-            input_image_path: Path to the input/reference image
+            input_image_path: Path to the input/reference image (first frame for FLF mode)
             output_path: Path where the generated video should be saved
             duration: Desired duration of the video in seconds
-            **kwargs: Additional backend-specific parameters
+            end_image_path: Optional path to the last frame image for First-Last-Frame (FLF)
+                           interpolation mode. When provided, the backend will generate
+                           video that smoothly transitions from input_image_path to 
+                           end_image_path. Check backend capabilities with get_capabilities()
+                           to see if 'supports_first_last_frame' is True.
+            **kwargs: Additional backend-specific parameters:
+                - aspect_ratio: Video aspect ratio (e.g., "16:9", "9:16")
+                - resolution: Video resolution (e.g., "720p", "1080p")
+                - negative_prompt: Text describing what to avoid in generation
+                - reference_images: List of reference image paths for style/content guidance
             
         Returns:
             Path to the generated video file
@@ -59,6 +74,9 @@ class VideoGeneratorInterface(ABC):
             - supported_resolutions: List of supported resolutions
             - supports_image_to_video: Whether backend supports image-to-video
             - supports_text_to_video: Whether backend supports text-to-video
+            - supports_first_last_frame: Whether backend supports FLF interpolation mode
+            - supports_video_extension: Whether backend can extend existing videos
+            - supports_reference_images: Whether backend supports style/content reference images
             - requires_gpu: Whether local GPU is required
             - api_based: Whether this is an API-based backend
         """
