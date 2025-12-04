@@ -37,8 +37,8 @@ export function PromptInput({ onJobCreated }: PromptInputProps) {
 
   const handleEstimate = async () => {
     const validation = validatePrompt(prompt);
-    if (!validation.valid) {
-      setErrors({ prompt: validation.message });
+    if (!validation.isValid) {
+      setErrors({ prompt: validation.error });
       return;
     }
 
@@ -215,8 +215,8 @@ export function PromptInput({ onJobCreated }: PromptInputProps) {
         <Button
           onClick={handleEstimate}
           disabled={!prompt.trim() || isEstimating}
-          variant="metallic"
-          className="w-full"
+          variant="default"
+          className="w-full bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-black font-semibold"
           size="lg"
         >
           {isEstimating ? (

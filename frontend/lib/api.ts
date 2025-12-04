@@ -70,14 +70,15 @@ class VisionWeaveAPI {
   }
 
   async createJob(prompt: string, title?: string, backend?: string): Promise<{ job_id: string }> {
-    return this.request('/jobs/', {
+    const response = await this.request<{ id: string }>('/jobs/', {
       method: 'POST',
       body: JSON.stringify({ 
         prompt, 
         title,
-        generator: backend || 'minimax'
+        generator: backend || 'veo3'
       }),
     });
+    return { job_id: response.id };
   }
 
   async getJobs(): Promise<JobStatus[]> {
