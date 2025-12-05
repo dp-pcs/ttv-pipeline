@@ -343,15 +343,41 @@ class Veo3Generator(VideoGeneratorInterface):
                 "config": config,
             }
             
-            # Add lastFrame for FLF interpolation mode
+            # Try FLF mode if requested, with fallback to I2V if SDK doesn't support it
+            flf_attempted = False
             if is_flf_mode and last_image:
-                api_kwargs["lastFrame"] = last_image
-                self.logger.info("Added lastFrame parameter for FLF interpolation")
+                # Check if SDK supports lastFrame parameter by inspecting the method signature
+                import inspect
+                try:
+                    sig = inspect.signature(self.genai_client.models.generate_videos)
+                    if 'lastFrame' in sig.parameters or 'last_frame' in sig.parameters:
+                        api_kwargs["lastFrame"] = last_image
+                        flf_attempted = True
+                        self.logger.info("Added lastFrame parameter for FLF interpolation")
+                    else:
+                        self.logger.warning("SDK does not support lastFrame parameter, falling back to I2V mode")
+                except Exception as e:
+                    self.logger.warning(f"Could not inspect SDK signature: {e}, trying FLF anyway")
+                    api_kwargs["lastFrame"] = last_image
+                    flf_attempted = True
             
-            operation = self.retry_handler.retry_with_backoff(
-                self.genai_client.models.generate_videos,
-                **api_kwargs
-            )
+            # Try to generate video, with fallback if FLF fails
+            try:
+                operation = self.retry_handler.retry_with_backoff(
+                    self.genai_client.models.generate_videos,
+                    **api_kwargs
+                )
+            except TypeError as e:
+                if "lastFrame" in str(e) and flf_attempted:
+                    # SDK doesn't support lastFrame, fall back to I2V mode
+                    self.logger.warning(f"FLF mode not supported by SDK, falling back to I2V: {e}")
+                    api_kwargs.pop("lastFrame", None)
+                    operation = self.retry_handler.retry_with_backoff(
+                        self.genai_client.models.generate_videos,
+                        **api_kwargs
+                    )
+                else:
+                    raise
             
             # Poll the operation until completion
             start_time = time.time()

@@ -155,7 +155,8 @@ video_aspect_ratio: "16:9"  # Default to widescreen landscape
 # When enabled, Veo 3.1 will generate video that smoothly transitions between
 # the first and last keyframe images, providing better visual continuity.
 # Requires: veo-3.1-generate-preview or veo-3.1-fast-generate-preview model
-use_first_last_frame: true
+# NOTE: Set to false until google-genai SDK supports lastFrame parameter
+use_first_last_frame: false
 
 # Veo model selection (for google_veo backend)
 # Options:
