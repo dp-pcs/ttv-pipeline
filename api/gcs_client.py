@@ -409,6 +409,146 @@ class GCSClient:
             logger.error(error_msg)
             raise GCSClientError(error_msg)
     
+    def browse_bucket(
+        self, 
+        prefix: str = "", 
+        delimiter: str = "/",
+        limit: int = 500
+    ) -> Dict[str, Any]:
+        """
+        Browse bucket contents with folder-like navigation.
+        
+        Args:
+            prefix: Path prefix to browse (e.g., "videos/2024-01/")
+            delimiter: Delimiter for folder simulation (default: "/")
+            limit: Maximum number of items to return
+            
+        Returns:
+            Dictionary with 'folders' and 'files' lists
+        """
+        try:
+            # Ensure prefix ends with delimiter if not empty
+            if prefix and not prefix.endswith(delimiter):
+                prefix = prefix + delimiter
+            
+            # List blobs with delimiter to get folder-like behavior
+            iterator = self._client.list_blobs(
+                self._bucket,
+                prefix=prefix if prefix else None,
+                delimiter=delimiter,
+                max_results=limit
+            )
+            
+            files = []
+            folders = set()
+            
+            # Iterate through blobs (files)
+            for blob in iterator:
+                # Skip if this is just the prefix itself
+                if blob.name == prefix:
+                    continue
+                    
+                # Get relative name from prefix
+                relative_name = blob.name[len(prefix):] if prefix else blob.name
+                
+                files.append({
+                    'name': relative_name,
+                    'full_path': blob.name,
+                    'gcs_uri': f"gs://{self.config.bucket}/{blob.name}",
+                    'size': blob.size,
+                    'size_formatted': self._format_size(blob.size),
+                    'created': blob.time_created.isoformat() if blob.time_created else None,
+                    'updated': blob.updated.isoformat() if blob.updated else None,
+                    'content_type': blob.content_type or 'application/octet-stream',
+                    'is_video': blob.content_type and blob.content_type.startswith('video/')
+                })
+            
+            # Get prefixes (folders)
+            for folder_prefix in iterator.prefixes:
+                # Get folder name from prefix
+                folder_name = folder_prefix[len(prefix):].rstrip(delimiter)
+                if folder_name:
+                    folders.add(folder_name)
+            
+            result = {
+                'bucket': self.config.bucket,
+                'current_path': prefix.rstrip(delimiter) if prefix else "",
+                'folders': sorted(list(folders)),
+                'files': sorted(files, key=lambda x: x['name']),
+                'total_files': len(files),
+                'total_folders': len(folders)
+            }
+            
+            logger.info(f"Browsed bucket path '{prefix}': {len(folders)} folders, {len(files)} files")
+            return result
+            
+        except Exception as e:
+            error_msg = f"Failed to browse bucket: {e}"
+            logger.error(error_msg)
+            raise GCSClientError(error_msg)
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format"""
+        if size_bytes is None:
+            return "Unknown"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} PB"
+    
+    def generate_download_url(
+        self, 
+        blob_path: str, 
+        expiration_seconds: int = 3600,
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        Generate a signed URL for downloading any file from the bucket.
+        
+        Args:
+            blob_path: Path to the blob within the bucket
+            expiration_seconds: URL expiration time in seconds
+            filename: Optional filename for Content-Disposition header
+            
+        Returns:
+            Signed HTTPS URL for downloading the file
+        """
+        try:
+            blob = self._bucket.blob(blob_path)
+            
+            if not blob.exists():
+                raise GCSClientError(f"File not found: {blob_path}")
+            
+            # Determine content type
+            content_type = blob.content_type or 'application/octet-stream'
+            
+            # Set content disposition for download
+            if filename:
+                disposition = f'attachment; filename="{filename}"'
+            else:
+                # Extract filename from path
+                file_name = blob_path.split('/')[-1]
+                disposition = f'attachment; filename="{file_name}"'
+            
+            expiration = datetime.utcnow() + timedelta(seconds=expiration_seconds)
+            
+            signed_url = blob.generate_signed_url(
+                expiration=expiration,
+                method="GET",
+                version="v4",
+                response_disposition=disposition,
+                response_type=content_type
+            )
+            
+            logger.info(f"Generated download URL for {blob_path}")
+            return signed_url
+            
+        except Exception as e:
+            error_msg = f"Failed to generate download URL for {blob_path}: {e}"
+            logger.error(error_msg)
+            raise GCSClientError(error_msg)
+    
     def get_bucket_info(self) -> Dict[str, Any]:
         """
         Get information about the configured bucket.
@@ -419,6 +559,11 @@ class GCSClient:
         try:
             self._bucket.reload()
             
+            # Count lifecycle rules (handle generator)
+            lifecycle_count = 0
+            if self._bucket.lifecycle_rules:
+                lifecycle_count = len(list(self._bucket.lifecycle_rules))
+            
             return {
                 'name': self._bucket.name,
                 'location': self._bucket.location,
@@ -426,7 +571,7 @@ class GCSClient:
                 'created': self._bucket.time_created,
                 'updated': self._bucket.updated,
                 'versioning_enabled': self._bucket.versioning_enabled,
-                'lifecycle_rules': len(self._bucket.lifecycle_rules) if self._bucket.lifecycle_rules else 0
+                'lifecycle_rules': lifecycle_count
             }
             
         except Exception as e:

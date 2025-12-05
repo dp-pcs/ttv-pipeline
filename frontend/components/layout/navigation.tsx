@@ -14,7 +14,8 @@ import {
   Mic, 
   Activity,
   Menu,
-  X 
+  X,
+  Cloud
 } from 'lucide-react';
 
 const navigationItems = [
@@ -35,6 +36,12 @@ const navigationItems = [
     href: '/downloads',
     icon: Download,
     description: 'Manage your generated content'
+  },
+  {
+    name: 'Storage',
+    href: '/storage',
+    icon: Cloud,
+    description: 'Browse cloud storage'
   },
   {
     name: 'Settings',
