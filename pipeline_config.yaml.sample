@@ -16,7 +16,7 @@ prompt: >
   They place their slices next to a chalkboard drawing showing 1/2 plus 1/4 equals 3/4.
   The scene ends with Milo and Pip high-fiving, with bold on-screen text "1/2 + 1/4 = 3/4!"
 
-# Backend selection (wan2.1, runway, veo3, minimax, auto)
+# Backend selection (wan2.1, runway, veo3, minimax, fal, fal.ai, auto)
 # If set to "auto", the system will automatically select the best available backend
 default_backend: veo3
 
@@ -31,6 +31,14 @@ generation_mode: "chaining"  # Options: "keyframe" or "chaining"
 wan2_dir: ./Wan2.1                              # Path to Wan2.1 framework code
 flf2v_model_dir: ./models/Wan2.1-FLF2V-14B-720P # Path to the FLF2V model weights (for keyframe mode)
 i2v_model_dir: ./models/Wan2.1-I2V-14B-720P     # Path to the I2V model weights (for chaining mode)
+
+# Local HunyuanVideo configuration
+hunyuan_video:
+  hunyuan_dir: ./frameworks/HunyuanVideo          # Path to HunyuanVideo repository
+  config_file: ./frameworks/HunyuanVideo/configs/inference_v1.yaml
+  ckpt_path: ./models/HunyuanVideo/weights.pt
+  max_duration: 5
+  sample_steps: 50
 
 # GPU settings for local generation
 total_gpus: 1        # Total number of GPUs available in the system
@@ -80,6 +88,14 @@ minimax:
   model: "I2V-01-Director"         # Minimax I2V model
   max_duration: 6                  # Maximum video duration in seconds (typical max for Minimax)
   base_url: "https://api.minimaxi.chat/v1"  # API base URL
+
+# Remote API configuration - fal.ai
+fal:
+  api_key: "YOUR_FAL_API_KEY"                 # Required unless FAL_API_KEY env var is set
+  model: "fal-ai/minimax/hailuo-02/standard/image-to-video"  # Any fal model endpoint ID
+  base_url: "https://fal.run"                 # fal synchronous endpoint base URL
+  max_duration: 10                             # Per-request duration cap enforced by this pipeline
+  default_input: {}                            # Optional model-specific default input fields
 
 # Remote API settings (applies to all API backends)
 remote_api_settings:

@@ -182,34 +182,40 @@ All pipeline behavior is controlled through `pipeline_config.yaml`. Copy `pipeli
     *   `task`, `size`, `prompt`: Core details for your video.
 
 2.  **Backend Selection**:
-    *   `default_backend`: Specify your preferred video generation backend (e.g., "wan2.1", "runway", "veo3", "minimax"). The system will attempt to use this backend first.
+    *   `default_backend`: Specify your preferred video generation backend (e.g., "wan2.1", "hunyuan", "runway", "veo3", "minimax", "fal", "fal.ai"). The system will attempt to use this backend first.
 
 3.  **Local Backend Configuration (Wan2.1)**:
     *   `wan2_dir`, `flf2v_model_dir`, `i2v_model_dir`: Paths for the local Wan2.1 setup.
     *   `total_gpus`, `parallel_segments`, `gpu_count`: GPU settings for local generation. `parallel_segments` is only supported in keyframe mode (chaining mode requires sequential processing). See "GPU Parallelization (for Local Wan2.1 Backend)" below.
     *   `chaining_max_retries`, `chaining_use_fsdp_flags`: Specific to Wan2.1 chaining mode.
+    *   `hunyuan_video`: Paths for the HunyuanVideo generator (`hunyuan_dir`, `config_file`, `ckpt_path`).
 
 4.  **Remote Backend Configuration**:
     *   `runway_ml`: Settings for Runway ML, including `api_key`, `model_version`, etc.
     *   `google_veo`: Settings for Google Veo, including `project_id`, `credentials_path`, etc.
     *   `minimax`: Settings for Minimax API, including `api_key`, `model_version`, etc.
+    *   `fal`: Settings for fal.ai, including `api_key`, `model`, optional `base_url`, and optional `default_input`.
 
 5.  **Remote API Settings (Common to all remote backends)**:
     *   `max_retries`, `timeout`: General settings for remote API calls.
-    *   `fallback_backend`: (Optional) Specify a backend (e.g., "wan2.1", "runway", "minimax") to use if the `default_backend` (if it's a remote API) fails. If not set, or if the specified fallback also fails, the system may try other available registered backends.
+    *   `fallback_backend`: (Optional) Specify a backend (e.g., "wan2.1", "runway", "minimax", "fal") to use if the `default_backend` (if it's a remote API) fails. If not set, or if the specified fallback also fails, the system may try other available registered backends.
 
-6.  **Cost Optimization**:
+6.  **fal.ai Metrics Output**:
+    *   When `default_backend` is `fal`/`fal.ai`, response headers such as cost and timing are captured when available.
+    *   Metrics are saved next to generated video output as `<output>.metrics.json`.
+
+7.  **Cost Optimization**:
     *   `max_cost_per_video`, `prefer_local_when_available`.
     *   `api_priority_order`: (Currently a placeholder for future advanced fallback strategies) Defines a preferred order if multiple remote APIs are configured. The current fallback logic is simpler (tries `fallback_backend` then iterates others).
 
-7.  **Image Generation Configuration**:
+8.  **Image Generation Configuration**:
     *   `image_generation_model`, `image_size`, API keys for image services (`image_router_api_key`, `stability_api_key`, `openai_api_key`).
 
-8.  **Generation Parameters (Applies to all video backends)**:
+9.  **Generation Parameters (Applies to all video backends)**:
     *   `segment_duration_seconds`: Desired duration for each video segment in seconds (e.g., 5.0). Crucial for chaining mode.
     *   `frame_num`, `sample_steps`, `guide_scale`, `base_seed`, etc.
 
-9.  **Output and Logging Configuration**.
+10.  **Output and Logging Configuration**.
 
 #### GPU Parallelization (for Local Wan2.1 Backend)
 When using the local Wan2.1 backend, the pipeline supports distributed processing and parallel segment generation:
@@ -336,7 +342,12 @@ The pipeline handles dimensions in the following ways:
   - Stability AI: Fixed 1024x1024 square format.
   - OpenAI: 1536x1024 (landscape) or 1024x1536 (portrait).
 
+
 Note: Some visual inconsistency may occur between the initial image and generated keyframes due to dimension differences.
+
+## HunyuanVideo Integration
+
+You can also use Tencent's [HunyuanVideo](https://github.com/Tencent-Hunyuan/HunyuanVideo) model for local generation. Clone the repository and set the `hunyuan_video` paths in `pipeline_config.yaml`.
 
 ## FramePack Integration (Optional Local Generator)
 

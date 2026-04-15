@@ -8,20 +8,25 @@ from video_generator_interface import VideoGeneratorInterface, VideoGenerationEr
 
 # Import local generators
 from generators.local.wan21_generator import Wan21Generator
+from generators.local.hunyuan_video_generator import HunyuanVideoGenerator
 
 # Import remote generators
 from generators.remote.runway_generator import RunwayMLGenerator
 from generators.remote.veo3_generator import Veo3Generator
 from generators.remote.minimax_generator import MinimaxGenerator
+from generators.remote.fal_generator import FalGenerator
 
 logger = logging.getLogger(__name__)
 
 # Registry of available generators
 GENERATOR_REGISTRY = {
     "wan2.1": Wan21Generator,
+    "hunyuan": HunyuanVideoGenerator,
     "runway": RunwayMLGenerator,
     "veo3": Veo3Generator,
     "minimax": MinimaxGenerator,
+    "fal": FalGenerator,
+    "fal.ai": FalGenerator,
 }
 
 
@@ -70,7 +75,24 @@ def create_video_generator(backend: str, config: Dict[str, Any]) -> VideoGenerat
                 "chaining_max_retries": config.get("chaining_max_retries", 3),
                 "chaining_use_fsdp_flags": config.get("chaining_use_fsdp_flags", True),
             }
-            
+
+        elif backend == "hunyuan":
+            # Local HunyuanVideo configuration
+            hunyuan_config = config.get("hunyuan_video", {})
+            backend_config = {
+                "hunyuan_dir": hunyuan_config.get("hunyuan_dir", "./HunyuanVideo"),
+                "config_file": hunyuan_config.get("config_file"),
+                "ckpt_path": hunyuan_config.get("ckpt_path"),
+                "max_duration": hunyuan_config.get("max_duration", 5),
+                "sample_steps": hunyuan_config.get("sample_steps", 50),
+                "seed": hunyuan_config.get("seed"),
+            }
+
+            if not backend_config["config_file"] or not backend_config["ckpt_path"]:
+                raise VideoGenerationError(
+                    "HunyuanVideo requires 'config_file' and 'ckpt_path'"
+                )
+
         elif backend == "runway":
             # Runway ML configuration
             runway_config = config.get("runway_ml", {})
@@ -129,6 +151,31 @@ def create_video_generator(backend: str, config: Dict[str, Any]) -> VideoGenerat
             
             if not backend_config["api_key"]:
                 raise VideoGenerationError("Minimax API key is required but not provided")
+
+        elif backend in ["fal", "fal.ai"]:
+            # fal.ai configuration
+            fal_config = config.get("fal", {})
+            remote_settings = config.get("remote_api_settings", {})
+
+            backend_config = {
+                "api_key": fal_config.get("api_key"),
+                "model": fal_config.get("model"),
+                "base_url": fal_config.get("base_url", "https://fal.run"),
+                "max_duration": fal_config.get("max_duration", 10),
+                "default_input": fal_config.get("default_input", {}),
+                "max_retries": remote_settings.get("max_retries", 3),
+                "timeout": remote_settings.get("timeout", 600),
+            }
+
+            if not backend_config["model"]:
+                raise VideoGenerationError("fal.ai model is required but not provided")
+
+            if not backend_config["api_key"]:
+                import os
+                if not os.getenv("FAL_API_KEY"):
+                    raise VideoGenerationError(
+                        "fal.ai API key is required but not provided (set config fal.api_key or FAL_API_KEY)"
+                    )
         
         # Create the generator instance
         generator = generator_class(backend_config)
