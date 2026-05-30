@@ -50,3 +50,21 @@ history.txt
 *.zip
 *.tar.gz
 *.tgz
+
+# Agent scaffold + AI session-report artifacts (not project code)
+.agent/
+.cursorrules
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+CURRENT_STATUS.md
+QUICKSTART.md
+RUNNING_SERVICES.md
+SETUP_STATUS.md
+frontend/CHARACTER_LIMIT_UPGRADE_10K.md
+frontend/COMPLETED_WORK_SUMMARY.md
+frontend/CORRECT_CHARACTER_LIMITS.md
+frontend/FIXES_APPLIED.md
+frontend/STATUS.md
+frontend/UI_REVIEW_REPORT.md
+frontend/UPGRADE_GUIDE.md

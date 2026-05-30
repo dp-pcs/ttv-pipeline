@@ -465,7 +465,13 @@ def execute_pipeline_with_config(
             # Use ConfigMerger to ensure proper precedence (HTTP prompt overrides config)
             config_merger = ConfigMerger()
             final_config = config_merger.merge_for_job(base_config, prompt)
-            
+
+            # Add environment variable fallbacks for API keys
+            if not final_config.get('gemini_api_key'):
+                final_config['gemini_api_key'] = os.getenv('GEMINI_API_KEY')
+            if not final_config.get('openai_api_key'):
+                final_config['openai_api_key'] = os.getenv('OPENAI_API_KEY')
+
             logger.info(f"Final configuration merged with prompt override")
             logger.info(f"Image generation model from config: {final_config.get('image_generation_model')}")
             logger.info(f"Gemini API key present: {'gemini_api_key' in final_config and bool(final_config.get('gemini_api_key'))}")
@@ -477,21 +483,34 @@ def execute_pipeline_with_config(
             
             job_queue.update_job_status(job_id, JobStatus.PROGRESS, progress=20)
             job_queue.add_job_log(job_id, "Enhancing and segmenting prompt")
-            
-            # Initialize prompt enhancer
-            enhancer = PromptEnhancer(
-                api_key=final_config.get('openai_api_key'),
-                base_url=final_config.get('openai_base_url', 'https://api.openai.com/v1'),
-                model=final_config.get('prompt_enhancement_model', 'gpt-4o-mini')
-            )
-            
-            # Enhance and segment the prompt
-            enhancement_result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, prompt)
-            
-            keyframe_prompts = enhancement_result['keyframe_prompts']
-            video_prompts = enhancement_result['video_prompts']
-            
-            logger.info(f"Generated {len(keyframe_prompts)} keyframe prompts and {len(video_prompts)} video prompts")
+
+            # Try to use OpenAI for prompt enhancement, fall back to basic segmentation if unavailable
+            try:
+                # Initialize prompt enhancer
+                enhancer = PromptEnhancer(
+                    api_key=final_config.get('openai_api_key'),
+                    base_url=final_config.get('openai_base_url', 'https://api.openai.com/v1'),
+                    model=final_config.get('prompt_enhancement_model', 'gpt-4o-mini')
+                )
+
+                # Enhance and segment the prompt
+                enhancement_result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, prompt)
+
+                keyframe_prompts = enhancement_result['keyframe_prompts']
+                video_prompts = enhancement_result['video_prompts']
+
+                logger.info(f"Generated {len(keyframe_prompts)} keyframe prompts and {len(video_prompts)} video prompts (OpenAI enhanced)")
+
+            except Exception as e:
+                # OpenAI unavailable - use basic fallback segmentation
+                logger.warning(f"OpenAI enhancement unavailable, using basic segmentation: {str(e)[:100]}")
+                job_queue.add_job_log(job_id, "Using basic prompt segmentation (OpenAI unavailable)")
+
+                # Simple fallback: use the full prompt as a single video segment
+                keyframe_prompts = [{"segment": 1, "prompt": prompt}]
+                video_prompts = [{"segment": 1, "prompt": prompt, "first_frame": None, "last_frame": None}]
+
+                logger.info(f"Using basic segmentation: 1 segment (OpenAI unavailable)")
             
             # Phase 4: Keyframe generation (50%)
             if check_cancellation(cancellation_token, job_id):

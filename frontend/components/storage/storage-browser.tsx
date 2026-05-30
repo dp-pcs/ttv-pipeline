@@ -72,11 +72,8 @@ export function StorageBrowser() {
 
   const fetchBucketInfo = async () => {
     try {
-      const response = await fetch('http://localhost:8000/storage/info');
-      if (response.ok) {
-        const data = await response.json();
-        setBucketInfo(data);
-      }
+      const data = await api.getStorageInfo();
+      setBucketInfo(data);
     } catch (error) {
       console.error('Failed to fetch bucket info:', error);
     }
@@ -85,11 +82,7 @@ export function StorageBrowser() {
   const browsePath = async (path: string) => {
     setIsLoading(true);
     try {
-      const response = await fetch(`http://localhost:8000/storage/browse?path=${encodeURIComponent(path)}`);
-      if (!response.ok) {
-        throw new Error('Failed to browse storage');
-      }
-      const data = await response.json();
+      const data = await api.browseStorage(path);
       setBrowseResult(data);
       setCurrentPath(path);
     } catch (error) {
@@ -122,31 +115,27 @@ export function StorageBrowser() {
 
   const handleDownload = async (file: StorageFile) => {
     setDownloadingPaths(prev => new Set(prev.add(file.full_path)));
-    
+
     try {
-      const response = await fetch(
-        `http://localhost:8000/storage/download?path=${encodeURIComponent(file.full_path)}`
-      );
-      
-      if (!response.ok) {
-        throw new Error('Download failed');
+      const response = await api.downloadFromStorage(file.full_path);
+
+      if (response instanceof Response) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+
+        toast({
+          variant: "default",
+          title: "Download Started",
+          description: `Downloading ${file.name}`,
+        });
       }
-      
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-      
-      toast({
-        variant: "default",
-        title: "Download Started",
-        description: `Downloading ${file.name}`,
-      });
     } catch (error) {
       console.error('Download failed:', error);
       toast({
@@ -164,7 +153,7 @@ export function StorageBrowser() {
   };
 
   const handlePreview = (file: StorageFile) => {
-    const streamUrl = `http://localhost:8000/storage/stream?path=${encodeURIComponent(file.full_path)}`;
+    const streamUrl = api.streamFromStorage(file.full_path);
     setPreviewUrl(streamUrl);
   };
 

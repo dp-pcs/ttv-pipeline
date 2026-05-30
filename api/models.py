@@ -23,7 +23,7 @@ class JobCreateRequest(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=8000,
+        max_length=10000,
         description="Text prompt for video generation"
     )
     title: Optional[str] = Field(
@@ -95,7 +95,7 @@ class JobEstimateRequest(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=8000,
+        max_length=10000,
         description="Text prompt for video generation"
     )
     title: Optional[str] = Field(

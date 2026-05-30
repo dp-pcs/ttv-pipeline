@@ -97,30 +97,30 @@ export function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-export function validatePrompt(prompt: string): { isValid: boolean; error?: string } {
+export function validatePrompt(prompt: string, maxLength: number = 10000): { isValid: boolean; error?: string } {
   if (!prompt || prompt.trim().length === 0) {
     return { isValid: false, error: 'Prompt cannot be empty' }
   }
-  
+
   if (prompt.length < 10) {
     return { isValid: false, error: 'Prompt must be at least 10 characters long' }
   }
-  
-  if (prompt.length > 8000) {
-    return { isValid: false, error: 'Prompt cannot exceed 8000 characters' }
+
+  if (prompt.length > maxLength) {
+    return { isValid: false, error: `Prompt cannot exceed ${maxLength.toLocaleString()} characters` }
   }
-  
+
   // Check for potentially problematic content
   const problematicPatterns = [
     /\b(hack|exploit|virus|malware)\b/i,
     /\b(illegal|piracy|copyright)\b/i,
   ]
-  
+
   for (const pattern of problematicPatterns) {
     if (pattern.test(prompt)) {
       return { isValid: false, error: 'Prompt contains potentially inappropriate content' }
     }
   }
-  
+
   return { isValid: true }
 }

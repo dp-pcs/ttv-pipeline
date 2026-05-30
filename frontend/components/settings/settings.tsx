@@ -64,6 +64,12 @@ export function Settings() {
     setIsSaving(true);
     try {
       localStorage.setItem('visionweave_settings', JSON.stringify(settings));
+
+      // Update API client base URL
+      if (settings.api_base_url) {
+        api.setBaseUrl(settings.api_base_url);
+      }
+
       toast({
         variant: "default",
         title: "Settings Saved",

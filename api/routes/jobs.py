@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import uuid
 import httpx
+import os
 
 from api.models import (
     JobCreateRequest, JobCreateResponse, JobStatusResponse,
@@ -61,40 +62,62 @@ async def estimate_job_cost(
         # Use ConfigMerger to get effective configuration
         config_merger = ConfigMerger()
         effective_config = config_merger.merge_for_job(base_config, request.prompt)
-        
-        # Initialize prompt enhancer
-        enhancer = PromptEnhancer(
-            api_key=effective_config.get('openai_api_key'),
-            base_url=effective_config.get('openai_base_url', 'https://api.openai.com/v1'),
-            model=effective_config.get('prompt_enhancement_model', 'gpt-4o-mini')
-        )
-        
-        # Import the enhancement instructions
-        from pipeline import PROMPT_ENHANCEMENT_INSTRUCTIONS
-        
-        # Enhance the prompt to determine segments
-        logger.info(f"Analyzing prompt for cost estimation: {request.prompt[:100]}...")
-        enhancement_result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, request.prompt)
-        
-        # Extract segment information
-        keyframe_prompts = enhancement_result.get('keyframe_prompts', [])
-        video_prompts = enhancement_result.get('video_prompts', [])
-        segmentation_logic = enhancement_result.get('segmentation_logic', {})
-        
-        num_segments = len(video_prompts)
+
+        # Try to use OpenAI for enhanced estimation, fall back to basic if unavailable
+        num_segments = 1
+        reasoning = "Basic estimate (OpenAI unavailable)"
+
+        try:
+            # Initialize prompt enhancer
+            # Use environment variable if config value is empty
+            openai_key = effective_config.get('openai_api_key') or os.getenv('OPENAI_API_KEY')
+            enhancer = PromptEnhancer(
+                api_key=openai_key,
+                base_url=effective_config.get('openai_base_url', 'https://api.openai.com/v1'),
+                model=effective_config.get('prompt_enhancement_model', 'gpt-4o-mini')
+            )
+
+            # Import the enhancement instructions
+            from pipeline import PROMPT_ENHANCEMENT_INSTRUCTIONS
+
+            # Enhance the prompt to determine segments
+            logger.info(f"Analyzing prompt with OpenAI for cost estimation: {request.prompt[:100]}...")
+            enhancement_result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, request.prompt)
+
+            # Extract segment information
+            video_prompts = enhancement_result.get('video_prompts', [])
+            segmentation_logic = enhancement_result.get('segmentation_logic', {})
+
+            num_segments = len(video_prompts) if video_prompts else 1
+            reasoning = segmentation_logic.get('reasoning', 'Prompt analyzed for optimal video pacing')
+            logger.info(f"OpenAI analysis successful: {num_segments} segments")
+
+        except Exception as e:
+            # OpenAI unavailable - use basic estimation
+            logger.warning(f"OpenAI enhancement unavailable, using basic estimate: {str(e)[:100]}")
+
+            # Simple heuristic based on prompt length
+            prompt_length = len(request.prompt)
+            if prompt_length < 200:
+                num_segments = 1
+                reasoning = "Short prompt - estimated 1 segment (basic estimate, OpenAI unavailable)"
+            elif prompt_length < 500:
+                num_segments = 2
+                reasoning = "Medium prompt - estimated 2 segments (basic estimate, OpenAI unavailable)"
+            else:
+                num_segments = 3
+                reasoning = "Long prompt - estimated 3 segments (basic estimate, OpenAI unavailable)"
+
         segment_duration = effective_config.get('segment_duration_seconds', 5.0)
         total_duration = num_segments * segment_duration
-        
+
         # Get the backend that will be used
         backend_name = effective_config.get('default_backend', 'veo3')
-        
+
         # Create generator instance to get cost estimation
         generator = create_video_generator(backend_name, effective_config)
         cost_per_segment = generator.estimate_cost(segment_duration)
         total_cost = cost_per_segment * num_segments
-        
-        # Get reasoning from segmentation logic
-        reasoning = segmentation_logic.get('reasoning', 'Prompt analyzed for optimal video pacing')
         
         logger.info(f"Cost estimation complete: {num_segments} segments, ${total_cost:.2f} total")
         
@@ -132,16 +155,26 @@ async def create_job(
     """
     from api.queue import JobQueue
     
+    from pipeline import load_config
+
     # Get job queue from app state
     job_queue: JobQueue = getattr(request_obj.app.state, 'job_queue', None)
     if not job_queue:
         raise HTTPException(status_code=503, detail="Job queue not available")
-    
+
+    # Load pipeline config to get default_backend
+    base_config_path = "/app/pipeline_config.yaml"
+    if not os.path.exists(base_config_path):
+        raise HTTPException(status_code=500, detail="Pipeline configuration not found")
+
+    base_config = load_config(base_config_path)
+    default_backend = base_config.get('default_backend', 'veo3')
+
     # Create and queue the job with basic configuration
     effective_config = {
         "prompt": request.prompt,
         "title": request.title,  # Custom job title
-        "generator": "minimax",  # Default generator
+        "generator": default_backend,  # Use configured default backend
         "parameters": {}
     }
     

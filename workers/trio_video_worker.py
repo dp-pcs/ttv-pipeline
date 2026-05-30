@@ -237,7 +237,13 @@ async def execute_pipeline_with_trio(
         # Use ConfigMerger to ensure proper precedence
         config_merger = ConfigMerger()
         final_config = config_merger.merge_for_job(base_config, prompt)
-        
+
+        # Add environment variable fallbacks for API keys
+        if not final_config.get('gemini_api_key'):
+            final_config['gemini_api_key'] = os.getenv('GEMINI_API_KEY')
+        if not final_config.get('openai_api_key'):
+            final_config['openai_api_key'] = os.getenv('OPENAI_API_KEY')
+
         logger.info(f"Final configuration merged with prompt override")
         
         # Phase 3: Prompt enhancement and segmentation (20%)
@@ -399,19 +405,36 @@ async def enhance_prompt_trio(
     """
     def enhance_sync():
         from pipeline import PromptEnhancer, PROMPT_ENHANCEMENT_INSTRUCTIONS
-        
-        enhancer = PromptEnhancer(
-            api_key=config.get('openai_api_key'),
-            base_url=config.get('openai_base_url', 'https://api.openai.com/v1'),
-            model=config.get('prompt_enhancement_model', 'gpt-4o-mini')
-        )
-        
-        return enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, prompt)
-    
+
+        try:
+            enhancer = PromptEnhancer(
+                api_key=config.get('openai_api_key'),
+                base_url=config.get('openai_base_url', 'https://api.openai.com/v1'),
+                model=config.get('prompt_enhancement_model', 'gpt-4o-mini')
+            )
+
+            result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, prompt)
+            logger.info("OpenAI prompt enhancement successful")
+            return result
+
+        except Exception as e:
+            # OpenAI unavailable - use basic fallback
+            logger.warning(f"OpenAI enhancement unavailable, using basic segmentation: {str(e)[:100]}")
+
+            # Simple fallback: use the full prompt as a single segment
+            return {
+                'keyframe_prompts': [{'segment': 1, 'prompt': prompt}],
+                'video_prompts': [{'segment': 1, 'prompt': prompt, 'first_frame': None, 'last_frame': None}],
+                'segmentation_logic': {
+                    'reasoning': 'Basic segmentation (OpenAI unavailable)',
+                    'segment_count': 1
+                }
+            }
+
     # Run enhancement in thread with cancellation check
     if await check_cancellation_async(cancellation_token, job_id=""):
         raise trio.Cancelled()
-    
+
     return await trio.to_thread.run_sync(enhance_sync)
 
 

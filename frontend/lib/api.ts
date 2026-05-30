@@ -6,8 +6,24 @@ import { JobStatus, JobDetails, JobEstimate, TranscriptionResult, ApiStatus } fr
 class VisionWeaveAPI {
   private baseUrl: string;
 
-  constructor(baseUrl: string = 'http://localhost:8000') {
-    this.baseUrl = baseUrl;
+  constructor(baseUrl?: string) {
+    // Priority: 1. Constructor param, 2. Environment variable, 3. Default
+    this.baseUrl = baseUrl ||
+                   (typeof window !== 'undefined' ? window.localStorage.getItem('visionweave_api_url') : null) ||
+                   process.env.NEXT_PUBLIC_API_URL ||
+                   'http://localhost:8000';
+  }
+
+  // Allow updating base URL at runtime (for settings page)
+  setBaseUrl(url: string): void {
+    this.baseUrl = url;
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('visionweave_api_url', url);
+    }
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   private async request<T>(
@@ -121,11 +137,28 @@ class VisionWeaveAPI {
   async downloadTranscription(srtContent: string, filename: string): Promise<Response> {
     return this.request('/transcription/download', {
       method: 'POST',
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         srt_content: srtContent,
-        filename 
+        filename
       }),
     });
+  }
+
+  // Storage / GCS Bucket Browser
+  async getStorageInfo(): Promise<any> {
+    return this.request('/storage/info');
+  }
+
+  async browseStorage(path: string = ''): Promise<any> {
+    return this.request(`/storage/browse?path=${encodeURIComponent(path)}`);
+  }
+
+  async downloadFromStorage(path: string): Promise<Response> {
+    return this.request(`/storage/download?path=${encodeURIComponent(path)}`);
+  }
+
+  async streamFromStorage(path: string): string {
+    return `${this.baseUrl}/storage/stream?path=${encodeURIComponent(path)}`;
   }
 }
 
