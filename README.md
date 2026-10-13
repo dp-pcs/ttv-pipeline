@@ -336,6 +336,8 @@ This project is licensed under the MIT License.
 
 ### Media Tooling integration
 
+Keyframe images can come from Gemini (`image_generation_model: gemini-…`) or from any OpenAI-compatible Images API behind a gateway. Add an `image_generation_gateway` block with `base_url`, `api_key_env` (the name of the environment variable that holds the key), optional `default_headers`, `size` and `quality`, and set `image_generation_model` to the model name the gateway exposes; see [`examples/pipeline_config.image-gateway.yaml`](examples/pipeline_config.image-gateway.yaml). The returned canvas is center-cropped to each scene's delivery aspect ratio, and the crop, gateway host and token usage are recorded with the keyframe.
+
 Start with [`examples/pipeline_config.h3-max.yaml`](examples/pipeline_config.h3-max.yaml) for MiniMax H3 Max through the production fal.ai backend. Set `FAL_KEY` or `FAL_API_KEY` in the environment. The exact endpoint is `minimax/h3-max/image-to-video`; it accepts integer durations from 5 through 15 seconds and `480P`, `768P` or `1080P` output. Its default prompt expansion is disabled in TTV so the reviewed prompt is submitted unchanged. Supply an image AssetRef with role `first_frame`; an optional ending image uses role `last_frame`. An empty planned `last_frame_prompt` means no ending-image operation. `integration_generate_last_frame: true` explicitly includes synthesized ending frames in new plans.
 
 The transport-neutral generation contract is available under `api/contracts/v1_0` and through `GET /v2/schemas/{name}`. Media Tooling vendors that directory and pins `schema-hashes.json`; the repositories share no runtime imports.

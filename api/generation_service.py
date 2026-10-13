@@ -300,11 +300,10 @@ class GenerationService:
                         a["role"] not in {"first_frame", "last_frame"}
                         for a in scene["reference_assets"]
                     )
-                    and not self.keyframe_generator
-                    and "gemini" not in str(self.config.get("image_generation_model", "")).lower()
+                    and not self._accepts_reference_images()
                 ):
                     warnings.append(
-                        "Multiple visual references require a configured Gemini keyframe model."
+                        "Multiple visual references require a Gemini keyframe model or an image gateway."
                     )
                     continue
                 supplied_last = any(a["role"] == "last_frame" for a in scene["reference_assets"])
@@ -896,6 +895,14 @@ class GenerationService:
                 (canonical_bytes(attempt), attempt["attempt_id"]),
             )
 
+    def _accepts_reference_images(self):
+        """Gemini models and OpenAI-compatible gateways take several visual references."""
+        return bool(
+            self.keyframe_generator
+            or self.config.get("image_generation_gateway")
+            or "gemini" in str(self.config.get("image_generation_model", "")).lower()
+        )
+
     def _keyframe(self, prompt, output, reference=None, reference_images_dir=None, aspect_ratio=None):
         if self.keyframe_generator:
             return self.keyframe_generator(prompt, output, reference)
@@ -915,6 +922,7 @@ class GenerationService:
             max_retries=0,
             allow_provider_fallback=False,
             aspect_ratio=aspect_ratio,
+            gateway=self.config.get("image_generation_gateway"),
         )
 
     def _publish_result(self, result):
@@ -1071,13 +1079,9 @@ class GenerationService:
                         if a["role"] not in {"first_frame", "last_frame"}
                     ]
                     if extra_references:
-                        if (
-                            not self.keyframe_generator
-                            and "gemini"
-                            not in str(self.config.get("image_generation_model", "")).lower()
-                        ):
+                        if not self._accepts_reference_images():
                             raise ValueError(
-                                "Multiple visual references require a configured Gemini keyframe model"
+                                "Multiple visual references require a Gemini keyframe model or an image gateway"
                             )
                         import shutil
 

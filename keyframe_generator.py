@@ -647,11 +647,106 @@ def generate_keyframe_with_gemini(
         logging.error(f"Error using Gemini API: {e}")
         raise
 
+def _crop_to_aspect(image, aspect_ratio):
+    """Center-crop to W:H when the provider's canvas differs from the delivery shape."""
+    if not aspect_ratio:
+        return image, None
+    w_r, h_r = (float(x) for x in str(aspect_ratio).split(":"))
+    target = w_r / h_r
+    w, h = image.size
+    if abs(w / h - target) < 0.01:
+        return image, None
+    if w / h > target:
+        nw = round(h * target)
+        box = ((w - nw) // 2, 0, (w - nw) // 2 + nw, h)
+    else:
+        nh = round(w / target)
+        box = (0, (h - nh) // 2, w, (h - nh) // 2 + nh)
+    return image.crop(box), box
+
+
+def generate_keyframe_with_gateway(prompt, output_path, model_name, gateway, input_image_path=None,
+                                   reference_images_dir=None, aspect_ratio=None, max_retries=0):
+    """Generate a keyframe through an OpenAI-compatible Images API behind a configurable gateway.
+
+    ``gateway`` comes from the ``image_generation_gateway`` config block: ``base_url``,
+    ``api_key_env`` (the name of the environment variable holding the key, read at call time and
+    never stored in configuration), optional ``default_headers``, ``size`` and ``quality``.
+    The returned canvas is center-cropped to the scene's delivery aspect ratio when it differs.
+    """
+    from urllib.parse import urlparse
+
+    from openai import OpenAI
+
+    key_env = gateway.get("api_key_env") or "OPENAI_API_KEY"
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        raise ValueError(f"Image gateway key variable {key_env} is not set")
+    base_url = gateway.get("base_url")
+    client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0,
+                    default_headers=dict(gateway.get("default_headers") or {}))
+    size = gateway.get("size") or "1536x1024"
+    references = []
+    if input_image_path and os.path.exists(input_image_path):
+        references.append(input_image_path)
+    if reference_images_dir and os.path.isdir(reference_images_dir):
+        references += sorted(
+            os.path.join(reference_images_dir, name) for name in os.listdir(reference_images_dir)
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        )
+    parameters = {"size": size, "aspect_ratio": aspect_ratio, "gateway": urlparse(base_url or "").netloc or None}
+    request = {"model": model_name, "prompt": prompt, "n": 1, "size": size}
+    if gateway.get("quality"):
+        request["quality"] = parameters["quality"] = gateway["quality"]
+    set_generation_details(provider="openai-compatible", model=model_name, prompt=prompt,
+                           reference_paths=tuple(references), parameters=parameters)
+    for attempt in range(max_retries + 1):
+        try:
+            if references:
+                files = [open(path, "rb") for path in references]
+                try:
+                    response = client.images.edit(image=files if len(files) > 1 else files[0], **request)
+                finally:
+                    for handle in files:
+                        handle.close()
+            else:
+                response = client.images.generate(**request)
+            break
+        except Exception:
+            if attempt == max_retries:
+                raise
+            time.sleep(2 ** attempt)
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        data = base64.b64decode(item.b64_json)
+    elif getattr(item, "url", None):
+        download = requests.get(item.url, timeout=120)
+        download.raise_for_status()
+        data = download.content
+    else:
+        raise Exception("Image gateway returned no image data")
+    usage = getattr(response, "usage", None)
+    raw = usage.model_dump_json() if hasattr(usage, "model_dump_json") else None
+    set_generation_details(provider_request_id=getattr(response, "_request_id", None),
+                           billing=BillingObservation(raw_unit_name="token_usage" if raw else None, raw_units=raw))
+    image = Image.open(io.BytesIO(data))
+    image.load()
+    image, box = _crop_to_aspect(image, aspect_ratio)
+    if box:
+        set_generation_details(parameters={**parameters, "center_crop": list(box)})
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    image.save(output_path, format="PNG")
+    return str(Path(output_path).resolve())
+
+
 GEMINI_IMAGE_SIZES = {"1K", "2K", "4K"}
 
 
-def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3, allow_provider_fallback=True, aspect_ratio=None):
+def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3, allow_provider_fallback=True, aspect_ratio=None, gateway=None):
     """Wrapper function to generate a keyframe using the appropriate API"""
+    if gateway:
+        return generate_keyframe_with_gateway(prompt, output_path, model_name, gateway, input_image_path=input_image_path,
+                                              reference_images_dir=reference_images_dir, aspect_ratio=aspect_ratio, max_retries=max_retries)
     # Import Colors class for colored output
     from pipeline import Colors
     
