@@ -54,3 +54,44 @@ def test_gemini_keyframe_generation_uses_google_genai_client(tmp_path, monkeypat
     assert generate_content_calls[0]["contents"][-1] == "Turn the square green"
     assert generate_content_calls[0]["contents"][0].inline_data.data == input_path.read_bytes()
     assert clients[0].closed
+
+
+def test_gemini_keyframe_requests_delivery_aspect_ratio(tmp_path, monkeypatch):
+    generated_image = BytesIO()
+    Image.new("RGB", (16, 9), color="green").save(generated_image, format="PNG")
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                parts=[SimpleNamespace(inline_data=SimpleNamespace(data=generated_image.getvalue()))]
+            )
+
+    class FakeClient:
+        def __init__(self, *, api_key):
+            self.models = FakeModels()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(keyframe_generator.genai, "Client", FakeClient)
+    keyframe_generator.generate_keyframe_with_gemini(
+        prompt="A dark observatory dome",
+        output_path=str(tmp_path / "wide.png"),
+        gemini_api_key="test-key",
+        model_name="test-image-model",
+        max_retries=0,
+        aspect_ratio="16:9",
+        image_size="2K",
+    )
+    keyframe_generator.generate_keyframe_with_gemini(
+        prompt="A dark observatory dome",
+        output_path=str(tmp_path / "default.png"),
+        gemini_api_key="test-key",
+        model_name="test-image-model",
+        max_retries=0,
+    )
+    assert calls[0]["config"].image_config.aspect_ratio == "16:9"
+    assert calls[0]["config"].image_config.image_size == "2K"
+    assert calls[1]["config"].image_config is None

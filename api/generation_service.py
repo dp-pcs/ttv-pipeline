@@ -896,7 +896,7 @@ class GenerationService:
                 (canonical_bytes(attempt), attempt["attempt_id"]),
             )
 
-    def _keyframe(self, prompt, output, reference=None, reference_images_dir=None):
+    def _keyframe(self, prompt, output, reference=None, reference_images_dir=None, aspect_ratio=None):
         if self.keyframe_generator:
             return self.keyframe_generator(prompt, output, reference)
         from keyframe_generator import generate_keyframe_output
@@ -914,6 +914,7 @@ class GenerationService:
             reference_images_dir=reference_images_dir,
             max_retries=0,
             allow_provider_fallback=False,
+            aspect_ratio=aspect_ratio,
         )
 
     def _publish_result(self, result):
@@ -1218,6 +1219,7 @@ class GenerationService:
                                                         if reference_directory
                                                         else None
                                                     ),
+                                                    scene["delivery"]["aspect_ratio"],
                                                 )
                                         except Conflict:
                                             raise

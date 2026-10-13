@@ -430,7 +430,9 @@ def generate_keyframe_with_gemini(
     input_image_path: Optional[str] = None,
     reference_images_dir: Optional[str] = None,
     model_name: str = "gemini-2.5-flash-image-preview",
-    max_retries: int = 2
+    max_retries: int = 2,
+    aspect_ratio: str | None = None,
+    image_size: str | None = None,
 ) -> str:
     """
     Generate a keyframe using Google's Gemini API.
@@ -450,12 +452,20 @@ def generate_keyframe_with_gemini(
     client = None
     try:
         client = genai.Client(api_key=gemini_api_key)
+        # Without an image config Gemini picks its own canvas (usually square), and an
+        # image-to-video model then generates on that canvas instead of the delivery shape.
+        image_config = (
+            types.ImageConfig(aspect_ratio=aspect_ratio, image_size=image_size)
+            if aspect_ratio or image_size
+            else None
+        )
         generation_config = types.GenerateContentConfig(
             response_modalities=["IMAGE"],
             temperature=0.9,
             top_p=0.95,
             top_k=40,
             max_output_tokens=8192,
+            image_config=image_config,
         )
         
         # Build prompt with reference images if provided
@@ -525,7 +535,7 @@ def generate_keyframe_with_gemini(
                     time.sleep(2 ** retry)
                 
                 # Generate content
-                set_generation_details(provider="gemini",model=model_name,reference_paths=tuple(submitted_references),prompt="\n".join(part for part in prompt_parts if isinstance(part,str)),parameters={"response_modalities":"IMAGE","temperature":0.9,"top_p":0.95,"top_k":40,"max_output_tokens":8192})
+                set_generation_details(provider="gemini",model=model_name,reference_paths=tuple(submitted_references),prompt="\n".join(part for part in prompt_parts if isinstance(part,str)),parameters={"response_modalities":"IMAGE","temperature":0.9,"top_p":0.95,"top_k":40,"max_output_tokens":8192,"aspect_ratio":aspect_ratio,"image_size":image_size})
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt_parts,
@@ -637,7 +647,10 @@ def generate_keyframe_with_gemini(
         logging.error(f"Error using Gemini API: {e}")
         raise
 
-def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3, allow_provider_fallback=True):
+GEMINI_IMAGE_SIZES = {"1K", "2K", "4K"}
+
+
+def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3, allow_provider_fallback=True, aspect_ratio=None):
     """Wrapper function to generate a keyframe using the appropriate API"""
     # Import Colors class for colored output
     from pipeline import Colors
@@ -664,7 +677,9 @@ def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None
                 input_image_path=input_image_path,
                 reference_images_dir=reference_images_dir,
                 model_name=model_name,
-                max_retries=max_retries
+                max_retries=max_retries,
+                aspect_ratio=aspect_ratio,
+                image_size=size if size in GEMINI_IMAGE_SIZES else None,
             )
         # Use Gemini for T2I if no reference images provided
         else:
@@ -673,7 +688,9 @@ def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None
                 output_path=output_path,
                 gemini_api_key=gemini_api_key,
                 model_name=model_name,
-                max_retries=max_retries
+                max_retries=max_retries,
+                aspect_ratio=aspect_ratio,
+                image_size=size if size in GEMINI_IMAGE_SIZES else None,
             )
     # Use OpenAI if specified and API key is provided
     elif "openai" in model_name.lower() and openai_api_key:
