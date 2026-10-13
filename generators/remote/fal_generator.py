@@ -84,9 +84,9 @@ def _veo_profile(endpoint: str, image_endpoint: str, first_last_endpoint: str) -
     )
 
 
-FAL_MODEL_PROFILES = {
-    "minimax/h3-max/image-to-video": FalModelProfile(
-        endpoint="minimax/h3-max/image-to-video",
+def _h3_profile(endpoint: str) -> FalModelProfile:
+    return FalModelProfile(
+        endpoint=endpoint,
         durations=tuple(range(5, 16)),
         duration_encoding="integer",
         first_frame_field="image_url",
@@ -99,7 +99,18 @@ FAL_MODEL_PROFILES = {
             ("sync_mode", (False,)),
             ("seed", None),
         ),
-    ),
+    )
+
+
+H3_ENDPOINTS = frozenset(
+    {"minimax/h3-max/image-to-video", "minimax/h3-max-turbo/image-to-video"}
+)
+
+
+FAL_MODEL_PROFILES = {
+    "minimax/h3-max/image-to-video": _h3_profile("minimax/h3-max/image-to-video"),
+    # Same input schema as H3 Max at a lower per-second price; used for iteration takes.
+    "minimax/h3-max-turbo/image-to-video": _h3_profile("minimax/h3-max-turbo/image-to-video"),
     "bytedance/seedance-2.0/image-to-video": FalModelProfile(
         endpoint="bytedance/seedance-2.0/image-to-video",
         durations=SEEDANCE_DURATIONS,
@@ -400,7 +411,7 @@ class FalGenerator(VideoGeneratorInterface):
         if not isinstance(request_input, dict):
             raise InvalidInputError("fal_input must be an object")
         options = {**self.default_input, **request_input}
-        if profile.endpoint == "minimax/h3-max/image-to-video":
+        if profile.endpoint in H3_ENDPOINTS:
             options = {
                 "resolution": "768P",
                 "prompt_expansion_mode": "disabled",

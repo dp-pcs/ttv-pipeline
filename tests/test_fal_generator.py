@@ -603,9 +603,13 @@ def test_factory_creates_profiled_fal_generator():
     assert generator.polling_interval == 2
 
 
+@pytest.mark.parametrize(
+    "endpoint", ["minimax/h3-max/image-to-video", "minimax/h3-max-turbo/image-to-video"]
+)
 @pytest.mark.parametrize("duration", [5, 5.0])
-def test_h3_max_first_frame_only_preserves_native_profile(monkeypatch, tmp_path, duration):
-    endpoint = "minimax/h3-max/image-to-video"
+def test_h3_max_first_frame_only_preserves_native_profile(
+    monkeypatch, tmp_path, duration, endpoint
+):
     first, _ = _images(tmp_path)
     calls = _install_completed_queue(monkeypatch, endpoint)
     generator = create_video_generator("fal", {"fal": {"api_key": "fixture", "model": endpoint}})
