@@ -141,7 +141,7 @@ The new VisionWeave frontend provides:
 - `keyframe_generator.py` - Handles generation of keyframes using Stability AI or OpenAI API
 - `pipeline_config.yaml.sample` - Comprehensive sample configuration file. Copy to `pipeline_config.yaml` and customize for your API keys, preferred backends (local Wan2.1, Runway, Google Veo, Minimax), generation parameters, and other settings.
 - `setup.sh` - Script to set up the environment and download necessary models for local generation.
-- `requirements.txt` - Python dependencies for the project.
+- `pyproject.toml` and `uv.lock` - Authoritative Python dependencies and reproducible lockfile.
 - `generators/` - Directory containing the video generator abstraction layer, including interfaces and specific backend implementations (local and remote).
 
 ### Directory Structure
@@ -192,17 +192,17 @@ All pipeline behavior is controlled through `pipeline_config.yaml`. Copy `pipeli
 
 4.  **Remote Backend Configuration**:
     *   `runway_ml`: Settings for Runway ML, including `api_key`, `model_version`, etc.
-    *   `google_veo`: Settings for Google Veo, including `project_id`, `credentials_path`, etc.
+    *   `google_veo`: Settings for Google Veo 3.1, including `project_id`, `credentials_path`, and optional `veo_model` (`veo-3.1-generate-001` by default or `veo-3.1-fast-generate-001`).
     *   `minimax`: Settings for Minimax API, including `api_key`, `model_version`, etc.
-    *   `fal`: Settings for fal.ai, including `api_key`, `model`, optional `base_url`, and optional `default_input`.
+    *   `fal`: Settings for a supported fal.ai model profile, including `api_key`, exact `model` endpoint, queue settings, and validated `default_input` fields. `FAL_KEY` is the preferred environment variable; `FAL_API_KEY` remains compatible.
 
 5.  **Remote API Settings (Common to all remote backends)**:
     *   `max_retries`, `timeout`: General settings for remote API calls.
     *   `fallback_backend`: (Optional) Specify a backend (e.g., "wan2.1", "runway", "minimax", "fal") to use if the `default_backend` (if it's a remote API) fails. If not set, or if the specified fallback also fails, the system may try other available registered backends.
 
-6.  **fal.ai Metrics Output**:
-    *   When `default_backend` is `fal`/`fal.ai`, response headers such as cost and timing are captured when available.
-    *   Metrics are saved next to generated video output as `<output>.metrics.json`.
+6.  **fal.ai Queue Metadata**:
+    *   fal jobs use the durable queue API and expose request ID, exact endpoint ID, queue metrics, billable units, and output metadata on `generator.last_request_metadata`.
+    *   Metadata is intentionally not written beside generated media; persistence and cost analytics are deferred.
 
 7.  **Cost Optimization**:
     *   `max_cost_per_video`, `prefer_local_when_available`.
@@ -213,6 +213,7 @@ All pipeline behavior is controlled through `pipeline_config.yaml`. Copy `pipeli
 
 9.  **Generation Parameters (Applies to all video backends)**:
     *   `segment_duration_seconds`: Desired duration for each video segment in seconds (e.g., 5.0). Crucial for chaining mode.
+    *   `duration_seconds`: Optional requested final runtime for direct Veo 3.1 or a supported fal profile, up to 14,440 seconds. The pipeline plans provider-compatible clips and trims only when no exact sum exists.
     *   `frame_num`, `sample_steps`, `guide_scale`, `base_seed`, etc.
 
 10.  **Output and Logging Configuration**.
@@ -239,7 +240,8 @@ Remote backends (Runway, Veo3, Minimax) manage their own scaling and do not use 
 ## Setup and Requirements
 
 ### Dependencies
-- Python 3.10+ (Not yet tested on Python 3.12 & Cuda 12.9 for Wan2.1 - coming soon!)
+- Python 3.14 (managed automatically by `uv` from `.python-version`).
+- [`uv`](https://docs.astral.sh/uv/) for environment and dependency management.
 - For Keyframe Generation: Stability AI API or OpenAI gpt-image-1 API key.
 - For Prompt Enhancement: OpenAI API key.
 - For Local Video Generation (Wan2.1): Wan2.1 I2V model (for chaining mode) or FLF2V model (for keyframe mode). Download via `setup.sh`.
@@ -254,14 +256,19 @@ Remote backends (Runway, Veo3, Minimax) manage their own scaling and do not use 
    cd ttv-pipeline
    ```
 
-2. Copy the sample configuration and add your API keys and preferences:
+2. Create the Python 3.14 development environment:
+   ```bash
+   uv sync --extra dev
+   ```
+
+3. Copy the sample configuration and add your API keys and preferences:
    ```bash
    cp pipeline_config.yaml.sample pipeline_config.yaml
    # Edit pipeline_config.yaml to add your API keys for OpenAI, Stability, Runway, Google Cloud, Minimax, etc.
    # Configure your default_backend, model paths (if using local), and other parameters.
    ```
 
-3. If using local Wan2.1 generation, run the setup script to download required frameworks and models:
+4. If using local Wan2.1 generation, run the setup script to download required frameworks and models:
    ```bash
    # Make the script executable
    chmod +x setup.sh
@@ -270,12 +277,12 @@ Remote backends (Runway, Veo3, Minimax) manage their own scaling and do not use 
    ./setup.sh
    ```
    *Note: To also set up FramePack (optional local generator), edit the `setup.sh` script and uncomment the `setup_framepack` function call before running.* 
-   If you are only using remote APIs for video generation, you might not need to run the full `setup.sh` script, but ensure Python dependencies from `requirements.txt` are installed.
+   Remote-only development needs only `uv sync --extra dev`; `setup.sh` is for optional local model frameworks and weights.
 
 ## Usage
 
 ```bash
-python pipeline.py --config pipeline_config.yaml
+uv run python pipeline.py --config pipeline_config.yaml --duration-seconds 15
 ```
 
 ## How It Works
@@ -310,7 +317,6 @@ python pipeline.py --config pipeline_config.yaml
 /output
   /frames  - Contains generated keyframe images
   /videos  - Contains generated video segments
-  config.yaml - Copy of used configuration
   enhanced_prompt.json - Enhanced prompt data
   final_video.mp4 - Final stitched video (when multiple segments are generated)
 ```
@@ -387,3 +393,60 @@ Contributions are welcome! Please open an issue or submit a pull request.
 ## License
 
 This project is licensed under the MIT License.
+
+### Media Tooling integration
+
+Keyframe images can come from Gemini (`image_generation_model: gemini-…`) or from any OpenAI-compatible Images API behind a gateway. Add an `image_generation_gateway` block with `base_url`, `api_key_env` (the name of the environment variable that holds the key), optional `default_headers`, `size` and `quality`, and set `image_generation_model` to the model name the gateway exposes; see [`examples/pipeline_config.image-gateway.yaml`](examples/pipeline_config.image-gateway.yaml). The returned canvas is center-cropped to each scene's delivery aspect ratio, and the crop, gateway host and token usage are recorded with the keyframe.
+
+Start with [`examples/pipeline_config.h3-max.yaml`](examples/pipeline_config.h3-max.yaml) for MiniMax H3 Max through the production fal.ai backend. Set `FAL_KEY` or `FAL_API_KEY` in the environment. The exact endpoint is `minimax/h3-max/image-to-video`; it accepts integer durations from 5 through 15 seconds and `480P`, `768P` or `1080P` output. Its default prompt expansion is disabled in TTV so the reviewed prompt is submitted unchanged. Supply an image AssetRef with role `first_frame`; an optional ending image uses role `last_frame`. An empty planned `last_frame_prompt` means no ending-image operation. `integration_generate_last_frame: true` explicitly includes synthesized ending frames in new plans.
+
+The transport-neutral generation contract is available under `api/contracts/v1_0` and through `GET /v2/schemas/{name}`. Media Tooling vendors that directory and pins `schema-hashes.json`; the repositories share no runtime imports.
+
+Plans bind the effective Fal endpoint, including first/last-frame routing, and
+reject oversized provider prompts before execution. Each scene's attempt limit
+must cover its planned unsupplied images and video calls. Image work requires
+explicit unknown-cost permission. Fixed-frame Wan2.1 and Hunyuan adapters are
+blocked in v2 planning until they provide verified duration control.
+
+Successful clips use the requested even delivery dimensions. TTV scales and pads
+provider output when needed and strips audio for `audio_policy: mute` before
+hashing the delivered asset. Original provider files remain available as
+`provider_output` assets. Required audio is checked against the encoded clip.
+Retained keyframes make an interrupted scene partial. Prepared input JPEGs are
+stored by content hash beside the output, and temporary files are removed on
+both successful and failed calls. GCS inputs use configured service-account
+credentials when available.
+
+Media Tooling's `media-motion-graphics` skill exports reviewed storyboard scenes
+with stable IDs and archived image review evidence. Imported takes become
+content layers in HyperFrames, where typography, UI motion, overlays, and timing
+remain editable. Footage revisions use targeted generation requests and new
+editorial selections. See [Media Tooling's handoff guide](https://github.com/kumanday/media-tooling/blob/feat/ttv-media-integration/docs/generated-media.md).
+
+Set `AUTH_TOKEN` to protect v1/v2 plans, jobs, results and cancellation. Capability and schema discovery remain public. Use `POST /v2/plans` with a hashed `GenerationRequest`, review the returned provider variants, then submit a hashed `PlanApproval` to `POST /v2/jobs`. Approvals bind the exact plan hash, allowed variants, keyframe/video mode and budget. Unknown estimates are null and require explicit `allow_unknown_cost`. `GET /v2/jobs/{id}/result` returns the immutable terminal attempt ledger, source clips, keyframes and take dependencies. Provider inputs and outputs are retained by content hash, including prepared reference images. Cancellation retains completed artifacts and attempts. Regeneration requests include only the scenes being replaced and identify prior result/take IDs.
+
+Planning derives reviewed prompts directly from scene intent and reuses the existing provider-duration planner. The v2 path performs deterministic decomposition. Provider support for an ending frame does not itself schedule a paid image call. A reviewed-keyframe video approval can execute only variants whose frames exist in the referenced keyframe result.
+
+File handoff uses the same service and canonical JSON:
+
+```sh
+python -m api.generation_handoff --root ./generation-data --config pipeline_config.yaml plan request.json > plan.json
+python -m api.generation_handoff --root ./generation-data --config pipeline_config.yaml approve approval.json > job.json
+python -m api.generation_handoff --root ./generation-data --config pipeline_config.yaml run JOB_ID > result.json
+python -m api.generation_handoff --root ./generation-data result JOB_ID
+```
+
+Configure `integration_root` (or `TTV_INTEGRATION_ROOT` for the API) as a durable shared filesystem directory accessible to the API and its workers. Set `integration_publish_gcs: false` for local HTTP operation with `file://` assets; deployed API configurations retain GCS publication by default. External input files require an explicit absolute directory in `integration_asset_roots`; external GCS inputs require an allowed `gs://bucket/prefix/` in `integration_asset_uri_prefixes`. Assets under the integration root and configured output GCS prefix are accepted automatically. SQLite records and idempotency bindings have no job TTL. Each paid operation claims a deterministic job/shot/stage key before submission and persists provider request IDs as soon as they arrive. Known or uncertain submissions cannot be submitted again under that key. Provider configuration is frozen at plan time; credentials are restored from the worker's deployment configuration. API deployments publish assets through the existing GCS uploader; local mode emits `file://` assets. A worker interrupted after provider submission must be investigated before restarting that job: active jobs are never automatically replayed as another paid request. Terminal result persistence and job completion are atomic; publication can be retried without replaying providers.
+
+The existing v1/standalone invocation remains available and writes provenance sidecars under `generation-data/legacy/<job-id>/result.json`. These describe the original invocation and preserve source files independently of worker temporary-directory cleanup. They do not create v2 approval records. Stitched outputs are scene previews; Media Tooling renders the final editorial selection from individual source clips.
+
+Run the deterministic offline pilot without credentials or provider charges:
+
+```sh
+python scripts/integration_pilot.py /tmp/ttv-media-pilot
+python -m pytest tests/test_generation_integration.py tests/test_fal_generator.py tests/test_veo31_duration.py tests/test_keyframe_checkpoints.py
+```
+
+The pilot emits a single-clip scene, a multi-clip scene, an approved fallback after failure, a continuity dependency and a targeted middle-scene replacement. Its handoff directory contains the actual storyboard, requests, plans, approvals and results for import into Media Tooling.
+
+Validation commands, baseline comparisons and operational limits are recorded in [integration validation](docs/media-tooling-integration-validation.md).

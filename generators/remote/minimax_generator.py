@@ -11,6 +11,7 @@ import logging
 import requests
 from typing import Dict, Any, List, Optional
 from video_generator_interface import (
+    recorded_generation, set_generation_details, BillingObservation, GenerationOutput,
     VideoGeneratorInterface,
     VideoGenerationError,
     APIError,
@@ -28,6 +29,9 @@ from generators.base import (
 
 class MinimaxGenerator(VideoGeneratorInterface):
     """Remote video generator using Minimax API with I2V-01-Director model"""
+
+    DEFAULT_MAX_DURATION = 6
+    MAX_PROMPT_LENGTH = 500
     
     # Pricing per second (estimated based on typical I2V pricing)
     PRICING = {
@@ -45,7 +49,7 @@ class MinimaxGenerator(VideoGeneratorInterface):
         super().__init__(config)
         self.api_key = config.get("api_key")
         self.model = config.get("model", "I2V-01-Director")
-        self.max_duration = config.get("max_duration", 6)  # Minimax typical max
+        self.max_duration = config.get("max_duration", self.DEFAULT_MAX_DURATION)
         self.base_url = config.get("base_url", "https://api.minimaxi.chat/v1")
         self.max_retries = config.get("max_retries", 3)
         self.polling_interval = config.get("polling_interval", 30)  # Poll every 30 seconds
@@ -82,7 +86,7 @@ class MinimaxGenerator(VideoGeneratorInterface):
             "api_based": True,
             "supports_camera_movements": True,
             "camera_movements": self.CAMERA_MOVEMENTS,
-            "max_prompt_length": 500,
+            "max_prompt_length": self.MAX_PROMPT_LENGTH,
             "cost_per_second": self.PRICING.get(self.model, 0.02)
         }
     
@@ -101,8 +105,10 @@ class MinimaxGenerator(VideoGeneratorInterface):
         # Validate prompt
         if not prompt or len(prompt.strip()) == 0:
             errors.append("Prompt cannot be empty")
-        elif len(prompt) > 500:
-            errors.append("Prompt too long (max 500 characters for Minimax)")
+        elif len(prompt) > self.MAX_PROMPT_LENGTH:
+            errors.append(
+                f"Prompt too long (max {self.MAX_PROMPT_LENGTH} characters for Minimax)"
+            )
         
         # Validate image
         image_validation = ImageValidator.validate_image(input_image_path, max_size_mb=10.0)
@@ -312,12 +318,13 @@ class MinimaxGenerator(VideoGeneratorInterface):
         self.logger.error(f"Could not find video URL in response: {json.dumps(response, indent=2)}")
         raise VideoGenerationError("No video URL found in API response")
     
+    @recorded_generation("minimax")
     def generate_video(self, 
                       prompt: str, 
                       input_image_path: str,
                       output_path: str,
                       duration: float = 5.0,
-                      **kwargs) -> str:
+                      **kwargs) -> GenerationOutput:
         """Generate video using Minimax API"""
         # Validate inputs
         validation_errors = self.validate_inputs(prompt, input_image_path, duration)
@@ -329,14 +336,21 @@ class MinimaxGenerator(VideoGeneratorInterface):
         self.logger.info(f"Estimated cost: ${estimated_cost:.2f}")
         
         # Add camera movement suggestions to prompt if not present
-        enhanced_prompt = self._enhance_prompt_with_camera_movement(prompt)
+        enhanced_prompt = (
+            prompt if kwargs.get("approved_prompt")
+            else self._enhance_prompt_with_camera_movement(prompt)
+        )
         
         # Use RetryHandler's retry_with_backoff method
         retry_handler = RetryHandler(max_retries=self.max_retries)
         
         def _generate_attempt():
             # Submit generation request
+            set_generation_details(model=self.model, prompt=enhanced_prompt,
+                parameters={"model": self.model},
+                billing=BillingObservation(estimated_usd=estimated_cost))
             response = self._submit_generation_request(enhanced_prompt, input_image_path)
+            set_generation_details(provider_request_id=response.get("task_id"))
             
             # Handle response based on API behavior
             if "task_id" in response:
@@ -360,7 +374,7 @@ class MinimaxGenerator(VideoGeneratorInterface):
             return output_path
         
         try:
-            return retry_handler.retry_with_backoff(_generate_attempt)
+            return _generate_attempt()
         except (APIError, GenerationTimeoutError, QuotaExceededError) as e:
             # Don't retry these specific errors
             raise e

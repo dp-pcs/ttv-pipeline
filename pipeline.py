@@ -16,20 +16,35 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
-from typing import Dict
-import time
+from typing import Dict, List, Optional, Union
+
 import yaml
+from instructor import from_openai, Mode
+
+from api.config_merger import ConfigMerger
+from api.models import (
+    KeyframePrompt,  # noqa: F401 - kept as a public pipeline import
+    PromptEnhancementResult,
+    SegmentationLogic,  # noqa: F401 - kept as a public pipeline import
+    VideoPrompt,  # noqa: F401 - kept as a public pipeline import
+)
 from frame_extractor import extract_last_frame
 from generators.factory import create_video_generator, get_fallback_generator
-from video_generator_interface import VideoGenerationError, APIError, GenerationTimeoutError, InvalidInputError, QuotaExceededError
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Union
-from pydantic import BaseModel
-from instructor import from_openai, Mode
-from api.config_merger import ConfigMerger
+from generators.remote.fal_generator import (
+    fal_profile_supports_last_frame,
+    get_fal_clip_durations,
+)
+from generators.remote.minimax_generator import MinimaxGenerator
+from video_generator_interface import (
+    APIError,
+    GenerationTimeoutError,
+    InvalidInputError,
+    QuotaExceededError,
+    VideoGenerationError,
+)
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
@@ -59,42 +74,18 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s: %(message)s"
 )
 
-# ============================================================================
-# Pydantic Models for Structured Prompt Enhancement
-# ============================================================================
-
-class SegmentationLogic(BaseModel):
-    total_duration_seconds: int
-    number_of_segments: int
-    reasoning: str
-
-class KeyframePrompt(BaseModel):
-    segment: int
-    prompt: str
-
-class VideoPrompt(BaseModel):
-    segment: int
-    prompt: str
-    first_frame: Optional[str] = None
-    last_frame: Optional[str] = None
-
-class PromptEnhancementResult(BaseModel):
-    segmentation_logic: SegmentationLogic
-    keyframe_prompts: List[KeyframePrompt]
-    video_prompts: List[VideoPrompt]
-
 # Instructions for prompt splitting and enhancement
 PROMPT_ENHANCEMENT_INSTRUCTIONS = """
-Split and enhance an input text-to-video prompt and starting reference image into detailed, standalone prompts for 5-second video segments. This requires narrative pacing, descriptive clarity, cinematic knowledge, and continuity skills.
+Split and enhance an input text-to-video prompt and starting reference image into detailed, standalone prompts for video segments. This requires narrative pacing, descriptive clarity, cinematic knowledge, and continuity skills.
 
 Analyze the Input Prompt and Starting Reference Image
 - Prompt Analysis: Identify the setting, characters, actions, camera movements, and style (e.g., mood, lighting).
 - Image Analysis: Examine the starting reference image (`provided_start_image.png`) for visual context, such as character positions or environmental details.
-- Continuity: Ensure each prompt is standalone, with full descriptions (e.g., "A woman in a red dress, tall and athletic") and uses reference images to link segments visually.
+- Continuity: Mark each segment as `cut` when it starts a new scene, era, location, or subject. Use `continue` only when the next segment is another shot in the same scene.
 
 Determine Duration and Segmentation
 - Estimate the total duration based on the complexity and pacing of actions.
-- Divide into 5-second segments, each with distinct start and end actions.
+- Unless backend-specific duration requirements are appended below, divide into 5-second segments, each with distinct start and end actions.
 - Balance the narrative flow across segments for a cohesive story.
 
 Enhance Prompt Specificity
@@ -111,21 +102,26 @@ Prompting Guidelines: Effective Prompting Techniques
 
 Generate Keyframe Prompts
 - Write text-to-image prompts for the last frame of each segment.
+- Set `transition` to `cut` or `continue`.
+- For `cut`, also write `start_prompt` for an independent first frame in the new scene. The end frame will be generated from that start frame so subjects cannot leak across scene boundaries.
+- For `continue`, omit `start_prompt`; the preceding segment's end frame is reused as the start.
 - Focus on the static scene: characters, objects, setting, and style.
 - Note that each segment is prompted separate, with no knowledge of prior segments other than the reference image. Therefore, if you refer to characters by name, be sure to explain who they are in the prompt.
 - Exclude camera movement; emphasize visual composition.
-- Each keyframe prompt generates an image (e.g., `segment_01.png`) that becomes the last frame of its segment and the first frame of the next segment.
+- Each keyframe prompt generates an end image such as `segment_01.png`. A `cut` also generates `segment_01_start.png`.
 
 Generate Video Prompts
-- Write text-to-video prompts for each 5-second segment.
+- Write one text-to-video prompt for each segment.
 - Detail actions, camera movements, and style.
-- Reference the first frame (`provided_start_image.png` for segment 1, `segment_XX.png` for others) and last frame (`segment_YY.png`).
+- Include `duration_seconds` for every video prompt; use 5 unless backend-specific requirements say otherwise.
+- For `cut`, reference `segment_YY_start.png` as first_frame and `segment_YY.png` as last_frame.
+- For `continue`, reference the preceding `segment_XX.png` as first_frame and the current `segment_YY.png` as last_frame. Segment 1 may use `provided_start_image.png` only when it truly continues a supplied image.
 - Ensure each prompt is standalone with full context.
 
 Reference Image Naming
-- The starting image is `provided_start_image.png` (used as the first frame of segment 1).
-- Each segment's last frame is named sequentially (e.g., `segment_01.png`, `segment_02.png`).
-- The last frame of one segment (e.g., `segment_01.png`) becomes the first frame of the next segment, ensuring visual continuity.
+- A cut segment N uses `segment_NN_start.png` and `segment_NN.png`.
+- A continuing segment N uses `segment_(NN-1).png` and `segment_NN.png`.
+- Do not carry a previous character, vehicle, architecture, or landscape across a cut.
 
 Output Format
 - Use JSON with:
@@ -146,10 +142,13 @@ Expected Output (JSON):
   "keyframe_prompts": [
     {
       "segment": 1,
+      "transition": "cut",
+      "start_prompt": "A woman in a red dress poised at the curb of a rainy street at night, cinematic lighting, viewed from behind.",
       "prompt": "A woman in a red dress, mid-stride, running on a rainy street at night, cinematic lighting, viewed from behind, streetlights reflecting on wet pavement."
     },
     {
       "segment": 2,
+      "transition": "continue",
       "prompt": "A woman in a red dress, reaching the other side of a rainy street at night, cinematic lighting, viewed from behind, streetlights reflecting on wet pavement."
     }
   ],
@@ -157,20 +156,412 @@ Expected Output (JSON):
     {
       "segment": 1,
       "prompt": "The camera tracks behind a woman in a red dress as she begins running across a rainy street at night, cinematic lighting, streetlights reflecting on wet pavement, rendered in a realistic style.",
-      "first_frame": "provided_start_image.png",
-      "last_frame": "segment_01.png"
+      "first_frame": "segment_01_start.png",
+      "last_frame": "segment_01.png",
+      "duration_seconds": 5
     },
     {
       "segment": 2,
       "prompt": "The camera continues tracking behind the woman in a red dress as she completes her run across the rainy street at night, cinematic lighting, streetlights reflecting on wet pavement, rendered in a realistic style.",
       "first_frame": "segment_01.png",
-      "last_frame": "segment_02.png"
+      "last_frame": "segment_02.png",
+      "duration_seconds": 5
     }
   ]
 }
 
 Respond ONLY with the JSON response formatted as above, with NO wrapper or commentary.
 """
+
+VEO_CLIP_DURATIONS = (4, 6, 8)
+MAX_REQUESTED_DURATION_SECONDS = 14_440
+MAX_PROMPT_SEGMENTS_PER_CALL = 20
+
+
+def get_video_generation_backend(config: Dict) -> str:
+    """Return the backend used for video generation."""
+    default_backend = config.get("default_backend", "wan2.1")
+    if (
+        str(config.get("generation_mode", "keyframe")).lower() == "keyframe"
+        and config.get("single_keyframe_mode", False)
+    ):
+        return str(
+            config.get("default_video_generation_backend") or default_backend
+        ).lower()
+    return str(default_backend).lower()
+
+
+def _normalized_backend(backend: str) -> str:
+    name = str(backend).lower()
+    if name in {"fal", "fal.ai", "falgenerator"}:
+        return "fal"
+    if name in {"veo3", "veo3generator"}:
+        return "veo3"
+    return name
+
+
+def _get_veo_clip_durations(config: Dict) -> tuple[int, ...]:
+    if config.get("google_veo", {}).get("resolution", "720p") in {
+        "1080p",
+        "4k",
+    }:
+        return (8,)
+    return VEO_CLIP_DURATIONS
+
+
+def get_backend_clip_durations(config: Dict) -> tuple[int, ...] | None:
+    """Return the active provider's allowed clip lengths, when constrained."""
+    backend = _normalized_backend(get_video_generation_backend(config))
+    if backend == "veo3":
+        return _get_veo_clip_durations(config)
+    if backend == "fal":
+        return get_fal_clip_durations(config.get("fal", {}).get("model"))
+    return None
+
+
+def get_provider_compatible_duration(
+    config: Dict,
+    primary_backend: str,
+    attempt_backend: str,
+    planned_duration: float,
+) -> float:
+    """Map fallback attempts to the receiving provider's duration contract."""
+    primary = _normalized_backend(primary_backend)
+    attempt = _normalized_backend(attempt_backend)
+    if attempt == "veo3":
+        durations = _get_veo_clip_durations(config)
+        if planned_duration not in durations:
+            return next(
+                (duration for duration in durations if duration >= planned_duration),
+                durations[-1],
+            )
+    if attempt == "fal":
+        durations = get_fal_clip_durations(config.get("fal", {}).get("model"))
+        if planned_duration not in durations:
+            return next(
+                (duration for duration in durations if duration >= planned_duration),
+                durations[-1],
+            )
+    if primary in {"veo3", "fal"} and attempt not in {"veo3", "fal"}:
+        return config.get("segment_duration_seconds", 5.0)
+    return planned_duration
+
+
+def apply_reviewed_plan_config(
+    config: Dict, reviewed_plan: Dict, duration_seconds: Optional[int]
+) -> None:
+    """Attach a reviewed plan without retaining an unrelated configured duration."""
+    if duration_seconds is None:
+        requested_total = reviewed_plan["segmentation_logic"][
+            "total_duration_seconds"
+        ]
+        generated_total = sum(
+            segment["duration_seconds"]
+            for segment in reviewed_plan["video_prompts"]
+        )
+        if requested_total != generated_total:
+            config["duration_seconds"] = requested_total
+        else:
+            config.pop("duration_seconds", None)
+    config["enhanced_prompt"] = reviewed_plan
+
+
+def resolve_frame_reference(frame_ref: Optional[str], frames_dir: str) -> Optional[str]:
+    """Resolve a prompt frame reference within the output frames directory."""
+    if not frame_ref:
+        return None
+    if frame_ref == "provided_start_image.png":
+        frame_ref = "segment_00.png"
+    if os.path.isabs(frame_ref):
+        return os.path.abspath(frame_ref)
+
+    frames_dir = os.path.abspath(frames_dir)
+    frame_path = os.path.abspath(os.path.join(frames_dir, frame_ref))
+    if os.path.commonpath((frames_dir, frame_path)) != frames_dir:
+        raise ValueError(f"Invalid frame path: {frame_ref}")
+    return frame_path
+
+
+def validate_existing_keyframes(video_prompts: List[Dict], output_dir: str) -> None:
+    """Fail before video submission when a reviewed storyboard is incomplete."""
+    from PIL import Image
+
+    frames_dir = os.path.join(output_dir, "frames")
+    for prompt_item in video_prompts:
+        resolved_paths = {}
+        for field in ("first_frame", "last_frame"):
+            frame_path = resolve_frame_reference(prompt_item.get(field), frames_dir)
+            if not frame_path or not os.path.exists(frame_path):
+                raise FileNotFoundError(
+                    f"Segment {prompt_item.get('segment')} {field} not found: {frame_path}"
+                )
+            with Image.open(frame_path) as image:
+                image.load()
+                resolved_paths[field] = (frame_path, image.size)
+
+        first_path, first_size = resolved_paths["first_frame"]
+        last_path, last_size = resolved_paths["last_frame"]
+        if first_size != last_size:
+            raise ValueError(
+                f"Segment {prompt_item.get('segment')} keyframe dimensions do not match: "
+                f"{first_path} is {first_size}, {last_path} is {last_size}"
+            )
+
+
+def plan_veo_segment_durations(duration_seconds: int) -> List[int]:
+    """Return the shortest Veo-compatible plan covering the requested runtime."""
+    if (
+        isinstance(duration_seconds, bool)
+        or not isinstance(duration_seconds, int)
+        or duration_seconds <= 0
+    ):
+        raise ValueError("duration_seconds must be a positive integer")
+    if duration_seconds > MAX_REQUESTED_DURATION_SECONDS:
+        raise ValueError(
+            f"duration_seconds must be at most {MAX_REQUESTED_DURATION_SECONDS}"
+        )
+
+    planned_total = max(4, duration_seconds + duration_seconds % 2)
+    eights, remainder = divmod(planned_total, 8)
+    if remainder == 0:
+        return [8] * eights
+    if remainder == 2:
+        return [8] * (eights - 1) + [4, 6]
+    return [8] * eights + [remainder]
+
+
+def plan_provider_segment_durations(
+    duration_seconds: int, allowed_durations: tuple[int, ...]
+) -> List[int]:
+    """Return a shortest exact provider plan, or the least-overrun plan."""
+    if allowed_durations == VEO_CLIP_DURATIONS:
+        return plan_veo_segment_durations(duration_seconds)
+    if (
+        isinstance(duration_seconds, bool)
+        or not isinstance(duration_seconds, int)
+        or duration_seconds <= 0
+    ):
+        raise ValueError("duration_seconds must be a positive integer")
+    if duration_seconds > MAX_REQUESTED_DURATION_SECONDS:
+        raise ValueError(
+            f"duration_seconds must be at most {MAX_REQUESTED_DURATION_SECONDS}"
+        )
+
+    limit = max(duration_seconds, allowed_durations[0]) + max(allowed_durations)
+    counts: list[int | None] = [None] * (limit + 1)
+    previous: list[tuple[int, int] | None] = [None] * (limit + 1)
+    counts[0] = 0
+    for total in range(limit + 1):
+        if counts[total] is None:
+            continue
+        for clip_duration in sorted(allowed_durations, reverse=True):
+            next_total = total + clip_duration
+            if next_total > limit:
+                continue
+            candidate_count = counts[total] + 1
+            if counts[next_total] is None or candidate_count < counts[next_total]:
+                counts[next_total] = candidate_count
+                previous[next_total] = (total, clip_duration)
+
+    for total in range(max(duration_seconds, min(allowed_durations)), limit + 1):
+        if counts[total] is not None:
+            plan = []
+            while total:
+                step = previous[total]
+                assert step is not None
+                predecessor, clip_duration = step
+                plan.append(clip_duration)
+                total = predecessor
+            return sorted(plan, reverse=True)
+    raise ValueError("No provider-compatible duration plan found")  # pragma: no cover
+
+
+def get_requested_segment_plan(config: Dict) -> Optional[List[int]]:
+    """Build the current provider's segment plan when final duration is requested."""
+    requested = config.get("duration_seconds")
+    if requested is None:
+        return None
+    if (
+        isinstance(requested, bool)
+        or not isinstance(requested, (int, float))
+        or int(requested) != requested
+    ):
+        raise ValueError("duration_seconds must be a positive integer")
+    if (
+        str(config.get("generation_mode", "keyframe")).lower() != "keyframe"
+        or not config.get("single_keyframe_mode", False)
+    ):
+        raise ValueError(
+            "duration_seconds requires generation_mode=keyframe and "
+            "single_keyframe_mode=true"
+        )
+    durations = get_backend_clip_durations(config)
+    if durations is None:
+        raise ValueError("duration_seconds is currently supported only for veo3 and fal backends")
+    return plan_provider_segment_durations(int(requested), durations)
+
+
+def get_requested_job_timeout(config: Dict) -> int:
+    """Allow enough queue time for every planned provider request plus pipeline overhead."""
+    plan = get_requested_segment_plan(config)
+    if not plan:
+        plan = (config.get("enhanced_prompt") or {}).get("video_prompts", [])
+    if not plan:
+        return 3600
+    provider_timeout = max(
+        600, int(config.get("remote_api_settings", {}).get("timeout", 600))
+    )
+    return 3600 + len(plan) * provider_timeout
+
+
+def get_duration_tradeoff(config: Dict) -> Optional[str]:
+    """Explain when exact runtime trimming removes the final generated keyframe."""
+    plan = get_requested_segment_plan(config)
+    requested = config.get("duration_seconds")
+    if plan and sum(plan) > requested:
+        backend = _normalized_backend(get_video_generation_backend(config))
+        durations = get_backend_clip_durations(config)
+        has_last_frame = backend == "veo3" or fal_profile_supports_last_frame(
+            config.get("fal", {}).get("model")
+        )
+        ending = (
+            "the final clip's ending keyframe will not appear"
+            if has_last_frame
+            else "the final generated endpoint will be removed"
+        )
+        return (
+            f"Requested {requested}s cannot be composed exactly from {backend} clips {list(durations)}; "
+            f"the {sum(plan)}s plan will be trimmed, so {ending}."
+        )
+    return None
+
+
+def get_trim_duration_seconds(config: Dict) -> Optional[int]:
+    """Return the requested final runtime only when the provider plan must be trimmed."""
+    return int(config["duration_seconds"]) if get_duration_tradeoff(config) else None
+
+
+def build_prompt_enhancement_instructions(config: Dict) -> str:
+    """Add only the active backend's prompt and duration constraints."""
+    backend = _normalized_backend(get_video_generation_backend(config))
+    instructions = PROMPT_ENHANCEMENT_INSTRUCTIONS
+    if backend == "minimax":
+        instructions += "\n\nIMPORTANT: Each Minimax video prompt must be 500 characters or less."
+    elif backend in {"veo3", "fal"}:
+        clip_durations = get_backend_clip_durations(config)
+        example_duration = min(clip_durations)
+        instructions = instructions.replace(
+            '"total_duration_seconds": 10',
+            f'"total_duration_seconds": {example_duration * 2}',
+        ).replace('"duration_seconds": 5', f'"duration_seconds": {example_duration}')
+        if backend == "veo3":
+            instructions += "\n\nIMPORTANT: Each Veo video prompt must be 1000 characters or less."
+        plan = get_requested_segment_plan(config)
+        if plan:
+            requested = int(config["duration_seconds"])
+            instructions += (
+                f"\nThe requested final runtime is exactly {requested} seconds. Return exactly {len(plan)} segments "
+                f"with duration_seconds values {plan} in order. Set segmentation_logic.total_duration_seconds "
+                f"to {requested} and number_of_segments to {len(plan)}."
+            )
+            tradeoff = get_duration_tradeoff(config)
+            if tradeoff:
+                instructions += f"\n{tradeoff}"
+        else:
+            instructions += (
+                f"\nInfer the final runtime and segment count. Every video_prompt must include duration_seconds "
+                f"as one of {list(clip_durations)}, and segmentation_logic.total_duration_seconds must equal "
+                "the sum of those durations."
+            )
+    return instructions
+
+
+def validate_prompt_enhancement(result: Dict, config: Dict) -> None:
+    """Reject an LLM decomposition that does not match the provider duration plan."""
+    video_prompts = result["video_prompts"]
+    keyframe_prompts = result["keyframe_prompts"]
+    segmentation = result["segmentation_logic"]
+    segment_numbers = list(range(1, len(video_prompts) + 1))
+
+    if [item.get("segment") for item in video_prompts] != segment_numbers:
+        raise ValueError("LLM video segments are not sequential")
+    if [item.get("segment") for item in keyframe_prompts] != segment_numbers:
+        raise ValueError("LLM keyframe segments do not match the video segments")
+    if segmentation.get("number_of_segments") != len(video_prompts):
+        raise ValueError("LLM segment count does not match its prompts")
+    if any(
+        not item.get("first_frame") or not item.get("last_frame")
+        for item in video_prompts
+    ):
+        raise ValueError("LLM provider segments must include first_frame and last_frame")
+    for keyframe, video in zip(keyframe_prompts, video_prompts, strict=True):
+        segment = video["segment"]
+        transition = keyframe.get("transition", "continue")
+        expected_first = (
+            f"segment_{segment:02d}_start.png"
+            if transition == "cut"
+            else (
+                "provided_start_image.png"
+                if segment == 1
+                else f"segment_{segment - 1:02d}.png"
+            )
+        )
+        if video["first_frame"] != expected_first:
+            raise ValueError(
+                f"Segment {segment} {transition} transition requires first_frame={expected_first}"
+            )
+        if video["last_frame"] != f"segment_{segment:02d}.png":
+            raise ValueError(
+                f"Segment {segment} requires last_frame=segment_{segment:02d}.png"
+            )
+
+    backend = _normalized_backend(get_video_generation_backend(config))
+    if backend == "minimax":
+        max_duration = config.get("minimax", {}).get(
+            "max_duration", MinimaxGenerator.DEFAULT_MAX_DURATION
+        )
+        for item in video_prompts:
+            prompt = item.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("LLM Minimax prompts cannot be empty")
+            if len(prompt) > MinimaxGenerator.MAX_PROMPT_LENGTH:
+                raise ValueError(
+                    "LLM Minimax prompts must be at most "
+                    f"{MinimaxGenerator.MAX_PROMPT_LENGTH} characters"
+                )
+            duration = item.get("duration_seconds")
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or duration < 1
+                or duration > max_duration
+            ):
+                raise ValueError(
+                    f"LLM Minimax durations must be between 1 and {max_duration} seconds"
+                )
+        total = sum(item["duration_seconds"] for item in video_prompts)
+        if segmentation.get("total_duration_seconds") != total:
+            raise ValueError(
+                f"LLM total duration {segmentation.get('total_duration_seconds')} "
+                f"does not match {total}"
+            )
+
+    durations_allowed = get_backend_clip_durations(config)
+    if durations_allowed is None:
+        return
+
+    durations = [item.get("duration_seconds") for item in video_prompts]
+    expected = get_requested_segment_plan(config)
+    if expected and durations != expected:
+        raise ValueError(f"LLM durations {durations} do not match requested segment plan {expected}")
+    if not expected and any(duration not in durations_allowed for duration in durations):
+        raise ValueError(f"LLM durations must use provider values {list(durations_allowed)}")
+
+    expected_total = int(config["duration_seconds"]) if expected else sum(durations)
+    if segmentation.get("total_duration_seconds") != expected_total:
+        raise ValueError(
+            f"LLM total duration {segmentation.get('total_duration_seconds')} does not match {expected_total}"
+        )
 
 class PromptEnhancer:
     """Uses OpenAI to enhance prompts with structured output validation via instructor"""
@@ -201,10 +592,108 @@ class PromptEnhancer:
 
         return result.dict()
 
+
+def enhance_prompt_data(prompt: str, config: Dict) -> Dict:
+    """Enhance and validate a prompt using the effective pipeline configuration."""
+    if config.get("enhanced_prompt") is not None:
+        result = PromptEnhancementResult.model_validate(
+            config["enhanced_prompt"]
+        ).model_dump(exclude_unset=True)
+        validate_prompt_enhancement(result, config)
+        return result
+
+    enhancer = PromptEnhancer(
+        api_key=config.get("openai_api_key"),
+        base_url=config.get("openai_base_url", "https://api.openai.com/v1"),
+        model=config.get("prompt_enhancement_model", "gpt-4o-mini"),
+    )
+    plan = get_requested_segment_plan(config)
+    if not plan or len(plan) <= MAX_PROMPT_SEGMENTS_PER_CALL:
+        result = enhancer.enhance(build_prompt_enhancement_instructions(config), prompt)
+    else:
+        keyframe_prompts = []
+        video_prompts = []
+        reasonings = []
+        batch_count = (
+            len(plan) + MAX_PROMPT_SEGMENTS_PER_CALL - 1
+        ) // MAX_PROMPT_SEGMENTS_PER_CALL
+
+        for batch_index, offset in enumerate(
+            range(0, len(plan), MAX_PROMPT_SEGMENTS_PER_CALL), start=1
+        ):
+            batch_plan = plan[offset:offset + MAX_PROMPT_SEGMENTS_PER_CALL]
+            batch_config = {**config, "duration_seconds": sum(batch_plan)}
+            first_segment = offset + 1
+            last_segment = offset + len(batch_plan)
+            batch_prompt = (
+                f"{prompt}\n\nGenerate only batch {batch_index} of {batch_count}, "
+                f"covering global segments {first_segment} through {last_segment}. "
+                "Number this batch locally starting at 1; the pipeline will renumber it. "
+                "Continue the same narrative rather than restarting it."
+            )
+            if video_prompts:
+                batch_prompt += (
+                    " The previous batch ended with: "
+                    f"{video_prompts[-1]['prompt']}"
+                )
+
+            batch_result = enhancer.enhance(
+                build_prompt_enhancement_instructions(batch_config), batch_prompt
+            )
+            reasonings.append(batch_result["segmentation_logic"]["reasoning"])
+
+            for local_index, (keyframe_prompt, video_prompt) in enumerate(
+                zip(
+                    batch_result["keyframe_prompts"],
+                    batch_result["video_prompts"],
+                    strict=True,
+                ),
+                start=1,
+            ):
+                segment = offset + local_index
+                keyframe_prompt = {**keyframe_prompt, "segment": segment}
+                transition = keyframe_prompt.get("transition", "continue")
+                video_prompt = {
+                    **video_prompt,
+                    "segment": segment,
+                    "first_frame": (
+                        f"segment_{segment:02d}_start.png"
+                        if transition == "cut"
+                        else (
+                            "provided_start_image.png"
+                            if segment == 1
+                            else f"segment_{segment - 1:02d}.png"
+                        )
+                    ),
+                    "last_frame": f"segment_{segment:02d}.png",
+                }
+                keyframe_prompts.append(keyframe_prompt)
+                video_prompts.append(video_prompt)
+
+        result = {
+            "segmentation_logic": {
+                "total_duration_seconds": int(config["duration_seconds"]),
+                "number_of_segments": len(plan),
+                "reasoning": " ".join(reasonings),
+            },
+            "keyframe_prompts": keyframe_prompts,
+            "video_prompts": video_prompts,
+        }
+
+    validate_prompt_enhancement(result, config)
+    tradeoff = get_duration_tradeoff(config)
+    if tradeoff:
+        logging.warning(tradeoff)
+    return result
+
 # ============================================================================
 # Pipeline Components
 # ============================================================================
 
+from api.generation_ledger import recorded_local_command
+
+
+@recorded_local_command
 def run_command(cmd: List[str], cwd: str = None) -> str:
     """Run a shell command and return its output"""
     try:
@@ -273,10 +762,96 @@ def generate_keyframes(
         initial_image_path=initial_image_path,
         image_size=image_size,
         reference_images_dir=reference_images_dir,
-        max_retries=max_retries
+        max_retries=max_retries,
     )
 
-def stitch_video_segments(video_paths: List[str], output_file: str) -> Optional[str]:
+
+def prepare_keyframes(
+    config: Dict,
+    keyframe_prompts: List[Union[str, Dict]],
+    video_prompts: List[Dict],
+    output_dir: str,
+) -> List[str]:
+    """Generate keyframes, preserve the starting frame, and resolve prompt frame paths."""
+    model_name = config.get("image_generation_model")
+    if not model_name:
+        raise ValueError("No image generation model specified")
+    if not keyframe_prompts:
+        raise ValueError("No keyframe prompts were generated")
+
+    first_transition = (
+        keyframe_prompts[0].get("transition", "continue")
+        if keyframe_prompts and isinstance(keyframe_prompts[0], dict)
+        else "continue"
+    )
+    initial_image = config.get("initial_image") if first_transition != "cut" else None
+    generated_initial = None
+    if initial_image:
+        initial_image = os.path.abspath(initial_image)
+        if not os.path.exists(initial_image):
+            raise FileNotFoundError(f"Initial image not found: {initial_image}")
+    elif first_transition != "cut":
+        first_prompt = keyframe_prompts[0]
+        if isinstance(first_prompt, dict):
+            first_prompt = first_prompt["prompt"]
+        generated_initial = os.path.join(output_dir, "initial_frame.png")
+        from keyframe_generator import generate_keyframe
+
+        initial_image = generate_keyframe(
+            prompt=f"First frame establishing shot: {first_prompt}",
+            output_path=generated_initial,
+            model_name=model_name,
+            imageRouter_api_key=config.get("image_router_api_key")
+            or config.get("image_router_token"),
+            stability_api_key=config.get("stability_api_key"),
+            openai_api_key=config.get("openai_api_key"),
+            gemini_api_key=config.get("gemini_api_key"),
+            size=config.get("image_size", "1024x1024"),
+            reference_images_dir=config.get("reference_images_dir"),
+            max_retries=config.get("remote_api_settings", {}).get("max_retries", 3),
+        )
+
+    keyframe_paths = generate_keyframes(
+        keyframe_prompts=keyframe_prompts,
+        config=config,
+        output_dir=output_dir,
+        model_name=model_name,
+        imageRouter_api_key=config.get("image_router_api_key") or config.get("image_router_token"),
+        stability_api_key=config.get("stability_api_key"),
+        openai_api_key=config.get("openai_api_key"),
+        gemini_api_key=config.get("gemini_api_key"),
+        initial_image_path=initial_image,
+        image_size=config.get("image_size", "1024x1024"),
+        reference_images_dir=config.get("reference_images_dir"),
+        max_retries=config.get("remote_api_settings", {}).get("max_retries", 3),
+    )
+    if not keyframe_paths:
+        raise RuntimeError("Keyframe generation produced no frames")
+
+    frames_dir = os.path.abspath(os.path.join(output_dir, "frames"))
+    segment_00_path = os.path.join(frames_dir, "segment_00.png")
+    if initial_image and os.path.abspath(initial_image) != segment_00_path:
+        shutil.copy2(initial_image, segment_00_path)
+
+    for prompt_item in video_prompts:
+        for field in ("first_frame", "last_frame"):
+            frame_ref = prompt_item.get(field)
+            if not frame_ref:
+                continue
+            frame_path = resolve_frame_reference(frame_ref, frames_dir)
+            if not os.path.exists(frame_path):
+                raise FileNotFoundError(f"{field} not found: {frame_path}")
+
+    if generated_initial and os.path.exists(generated_initial):
+        os.remove(generated_initial)
+    return keyframe_paths
+
+
+def stitch_video_segments(
+    video_paths: List[str],
+    output_file: str,
+    trim_duration_seconds: Optional[int] = None,
+) -> Optional[str]:
     """Stitch together video segments into a final video using ffmpeg"""
     if not video_paths:
         logging.warning("No video paths provided for stitching")
@@ -289,13 +864,22 @@ def stitch_video_segments(video_paths: List[str], output_file: str) -> Optional[
         list_file = f.name
 
     # Use ffmpeg to concatenate the segments
-    cmd = ["ffmpeg", "-f", "concat", "-safe", "0",
-        "-i", list_file, "-c", "copy", output_file, "-y"]
+    cmd = ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_file]
+    if trim_duration_seconds is not None:
+        cmd.extend([
+            "-t", str(trim_duration_seconds),
+            "-c:v", "libx264",
+            "-c:a", "aac",
+        ])
+    else:
+        cmd.extend(["-c", "copy"])
+    cmd.extend([output_file, "-y"])
     run_command(cmd)
 
     # Clean up the temporary file
     os.unlink(list_file)
     return output_file
+
 
 def generate_single_video_segment(
     wan2_dir: str,
@@ -317,7 +901,7 @@ def generate_single_video_segment(
         flf2v_model_dir: Path to the FLF2V model directory
         frame_num: Number of frames to generate
         gpu_ids: List of GPU IDs to use for this segment generation
-        single_keyframe_mode: If True, use single keyframe for I2V generation (for Veo3)
+        single_keyframe_mode: If True, use the remote keyframe generation path (for Veo3)
 
     Returns:
         Path to the generated video file
@@ -330,10 +914,8 @@ def generate_single_video_segment(
         logging.info(f"Segment {seg} using GPUs: {gpu_ids}")
         print(f"{Colors.BOLD}{Colors.YELLOW}Segment {seg}{Colors.RESET} using GPUs: {Colors.CYAN}{gpu_ids}{Colors.RESET}")
 
-    # ALWAYS use this exact directory structure - no exceptions
-    base_dir = os.getcwd()
-    frames_dir = os.path.join(base_dir, "output", "frames")
-    videos_dir = os.path.join(base_dir, "output", "videos")
+    frames_dir = os.path.join(output_dir, "frames")
+    videos_dir = os.path.join(output_dir, "videos")
 
     # Create fresh directories if needed (safe in multiprocessing)
     os.makedirs(frames_dir, exist_ok=True)
@@ -343,8 +925,10 @@ def generate_single_video_segment(
     print(f"\n{Colors.BOLD}{Colors.YELLOW}Generating video for segment {seg}:{Colors.RESET}")
     print(f"{Colors.CYAN}{prompt_text[:100]}...{Colors.RESET}")
 
+    if prompt_item.get("first_frame"):
+        first_file = resolve_frame_reference(prompt_item["first_frame"], frames_dir)
     # For the first segment, use the initial_image if provided
-    if seg == 1 and config.get("initial_image"):
+    elif seg == 1 and config.get("initial_image"):
         initial_image = config.get("initial_image")
         # Always use absolute paths for consistency
         if not os.path.isabs(initial_image):
@@ -368,7 +952,9 @@ def generate_single_video_segment(
             raise FileNotFoundError(f"Previous frame not found: {first_file}")
 
     # Path for this segment's keyframe
-    last_file = os.path.join(frames_dir, f"segment_{seg:02d}.png")
+    last_file = resolve_frame_reference(prompt_item.get("last_frame"), frames_dir)
+    if not last_file:
+        last_file = os.path.join(frames_dir, f"segment_{seg:02d}.png")
     if not os.path.exists(last_file):
         logging.error(f"Keyframe not found: {last_file}")
         logging.error(f"Directory contents: {os.listdir(frames_dir)}")
@@ -504,6 +1090,10 @@ def generate_video_segments(
     print(f"\n{Colors.BOLD}{Colors.PURPLE}Parallel Video Generation:{Colors.RESET}")
     print(f"{Colors.CYAN}Running {parallel_segments} segments in parallel, each using {gpus_per_segment} GPUs{Colors.RESET}")
 
+    from api.generation_ledger import active_ledger
+    if ledger := active_ledger.get():
+        config["_legacy_ledger_directory"] = str(ledger.root)
+        ledger.expected_segments = {prompt["segment"] for prompt in video_prompts}
     # Import multiprocessing here to avoid issues with recursive imports
     import multiprocessing as mp
     from functools import partial
@@ -557,6 +1147,11 @@ def generate_video_segments(
 
 def process_segment(prompt_item, gpu_ids, wan2_dir, config, output_dir, flf2v_model_dir, frame_num):
     """Process a single segment in a separate process"""
+    from api.generation_ledger import active_ledger, LegacyLedger
+    from pathlib import Path
+    if config.get("_legacy_ledger_directory"):
+        ledger_path = Path(config["_legacy_ledger_directory"])
+        active_ledger.set(LegacyLedger(ledger_path.parent, ledger_path.name))
     try:
         return generate_single_video_segment(
             wan2_dir=wan2_dir,
@@ -576,14 +1171,11 @@ def process_segment(prompt_item, gpu_ids, wan2_dir, config, output_dir, flf2v_mo
 def generate_video_segments_single_keyframe(
     config: Dict,
     video_prompts: List[Dict],
-    output_dir: str
+    output_dir: str,
+    cancellation_check=None,
 ) -> List[str]:
     """
-    Generate video segments using keyframes for I2V or FLF generation.
-    
-    For backends that support First-Last-Frame (FLF) interpolation (like Veo 3.1),
-    this function will automatically use both first and last frames when available.
-    For backends that only support I2V, it falls back to single keyframe mode.
+    Generate video segments through remote keyframe APIs (e.g., Veo3 first/last frame).
 
     Args:
         config: Configuration dictionary
@@ -594,23 +1186,15 @@ def generate_video_segments_single_keyframe(
         List of paths to generated video files
     """
     import generators.factory as factory
-    from generators.exceptions import InvalidInputError, GenerationError
-
     video_paths = []
 
     # Get the video generation backend
-    backend = config.get('default_video_generation_backend', 'veo3')
-    logging.info(f"Using {backend} for video generation")
-
-    # Get segment duration
-    segment_duration = config.get('segment_duration_seconds', 5.0)
+    backend = get_video_generation_backend(config)
+    logging.info(f"Using {backend} for single-keyframe video generation")
 
     # Get I2I mode configuration
     i2i_config = config.get('i2i_mode', {})
     keyframe_position = i2i_config.get('keyframe_position', 'first')
-    
-    # Check if FLF mode is explicitly enabled in config
-    use_flf_mode = config.get('use_first_last_frame', True)  # Default to True for FLF-capable backends
 
     # Use consistent directory structure with other functions
     frames_dir = os.path.join(output_dir, "frames")
@@ -622,127 +1206,99 @@ def generate_video_segments_single_keyframe(
 
     # Ensure we're using absolute paths for keyframe files
     frames_dir_abs = os.path.abspath(frames_dir)
-    logging.info(f"Absolute frames directory path: {frames_dir_abs}")
-    
-    # Create video generator once and check its capabilities
-    generator = factory.create_video_generator(backend, config)
-    capabilities = generator.get_capabilities()
-    supports_flf = capabilities.get('supports_first_last_frame', False)
-    
-    if supports_flf and use_flf_mode:
-        logging.info(f"Backend {backend} supports First-Last-Frame (FLF) interpolation mode")
-        # FLF mode requires 8 second duration for Veo 3.1
-        flf_constraints = capabilities.get('flf_constraints', {})
-        required_duration = flf_constraints.get('required_duration', 8)
-        if segment_duration != required_duration:
-            logging.info(f"FLF mode requires {required_duration}s duration, adjusting from {segment_duration}s")
-            segment_duration = required_duration
-    else:
-        logging.info(f"Using single-keyframe I2V mode (FLF support: {supports_flf}, FLF enabled: {use_flf_mode})")
+    logging.info(f"Absolute frames directory path for single-keyframe mode: {frames_dir_abs}")
 
     for prompt_item in video_prompts:
+        if cancellation_check and cancellation_check():
+            raise InterruptedError("Video generation cancelled")
         seg, prompt_text = prompt_item["segment"], prompt_item["prompt"]
-
-        # Get first and last frame paths from prompt item
-        first_frame_ref = prompt_item.get('first_frame')
-        last_frame_ref = prompt_item.get('last_frame')
-        
-        # Resolve first frame path
-        first_frame_path = None
-        if first_frame_ref:
-            if first_frame_ref == 'provided_start_image.png':
-                first_frame_path = os.path.join(frames_dir_abs, 'segment_00.png')
-            elif first_frame_ref.startswith('segment_') and first_frame_ref.endswith('.png'):
-                first_frame_path = os.path.join(frames_dir_abs, first_frame_ref)
-            else:
-                first_frame_path = os.path.join(frames_dir_abs, first_frame_ref)
-        
-        # Resolve last frame path
-        last_frame_path = None
-        if last_frame_ref:
-            if last_frame_ref.startswith('segment_') and last_frame_ref.endswith('.png'):
-                last_frame_path = os.path.join(frames_dir_abs, last_frame_ref)
-            else:
-                last_frame_path = os.path.join(frames_dir_abs, last_frame_ref)
-        
-        # Determine which mode to use for this segment
-        use_flf_for_segment = (
-            supports_flf and 
-            use_flf_mode and 
-            first_frame_path and 
-            last_frame_path and
-            os.path.exists(first_frame_path) and 
-            os.path.exists(last_frame_path) and
-            first_frame_path != last_frame_path  # Don't use FLF if same frame
+        segment_duration = prompt_item.get(
+            "duration_seconds", config.get("segment_duration_seconds", 5.0)
         )
-        
-        # Select the primary keyframe based on position setting (for I2V fallback)
-        if keyframe_position == 'first' and first_frame_path:
-            keyframe_path = first_frame_path
-        elif keyframe_position == 'last' and last_frame_path:
-            keyframe_path = last_frame_path
+        last_frame_path = resolve_frame_reference(
+            prompt_item.get("last_frame"), frames_dir_abs
+        )
+
+        # Veo first/last-frame generation always starts from the first frame.
+        if backend in {'veo3', 'fal', 'fal.ai'}:
+            keyframe_path = prompt_item.get('first_frame')
+        elif keyframe_position == 'first' and 'first_frame' in prompt_item:
+            keyframe_path = prompt_item['first_frame']
+        elif keyframe_position == 'last' and 'last_frame' in prompt_item:
+            keyframe_path = prompt_item['last_frame']
+        elif keyframe_position == 'middle':
+            # For middle, use first frame if available (could be enhanced later)
+            keyframe_path = prompt_item.get('first_frame', prompt_item.get('last_frame'))
         else:
-            keyframe_path = first_frame_path or last_frame_path
+            # Default to first frame
+            keyframe_path = prompt_item.get('first_frame', prompt_item.get('last_frame'))
+
+        keyframe_path = resolve_frame_reference(keyframe_path, frames_dir_abs)
 
         if not keyframe_path:
             logging.error(f"No keyframe found for segment {seg}")
             continue
 
-        if use_flf_for_segment:
-            logging.info(f"Generating video for segment {seg} using FLF mode:")
-            logging.info(f"  First frame: {first_frame_path}")
-            logging.info(f"  Last frame:  {last_frame_path}")
-        else:
-            logging.info(f"Generating video for segment {seg} using single keyframe: {keyframe_path}")
+        if last_frame_path:
+            from PIL import Image
+
+            with Image.open(keyframe_path) as first_image, Image.open(
+                last_frame_path
+            ) as last_image:
+                if first_image.size != last_image.size:
+                    raise InvalidInputError(
+                        f"Segment {seg} first/last keyframe dimensions do not match: "
+                        f"{first_image.size} != {last_image.size}"
+                    )
+
+        logging.info(f"Generating video for segment {seg} using keyframe: {keyframe_path}")
+        video_file = os.path.join(videos_dir, f"segment_{seg:03d}.mp4")
 
         try:
-            # Generate video file path
-            video_file = os.path.join(output_dir, f"segment_{seg:03d}.mp4")
+            # Create video generator
+            generator = factory.create_video_generator(backend, config)
 
-            # Call generator's generate_video method with FLF support
-            if use_flf_for_segment:
-                generator.generate_video(
-                    prompt=prompt_text,
-                    input_image_path=first_frame_path,
-                    output_path=video_file,
-                    duration=segment_duration,
-                    end_image_path=last_frame_path  # FLF interpolation!
+            # Call generator's generate_video method
+            generator.generate_video(
+                prompt=prompt_text,
+                input_image_path=keyframe_path,
+                output_path=video_file,
+                duration=segment_duration,
+                last_frame_path=last_frame_path,
+                cancellation_check=cancellation_check,
+            )
+
+            video_paths.append(video_file)
+            logging.info(f"Generated video segment {seg}: {video_file}")
+
+        except VideoGenerationError as e:
+            logging.error(f"Failed to generate video for segment {seg}: {e}")
+
+            if config.get("duration_seconds") is not None:
+                raise
+
+            # Try fallback if configured
+            fallback_generator = factory.get_fallback_generator(backend, config)
+            if fallback_generator:
+                logging.info(f"Trying fallback generator for segment {seg}")
+                fallback_duration = get_provider_compatible_duration(
+                    config,
+                    backend,
+                    fallback_generator.get_backend_name(),
+                    segment_duration,
                 )
-            else:
-                generator.generate_video(
+                fallback_generator.generate_video(
                     prompt=prompt_text,
                     input_image_path=keyframe_path,
                     output_path=video_file,
-                    duration=segment_duration
+                    duration=fallback_duration,
+                    last_frame_path=last_frame_path,
+                    cancellation_check=cancellation_check,
                 )
-
-            video_paths.append(video_file)
-            mode_str = "FLF" if use_flf_for_segment else "I2V"
-            logging.info(f"Generated video segment {seg} ({mode_str}): {video_file}")
-
-        except (InvalidInputError, GenerationError) as e:
-            logging.error(f"Failed to generate video for segment {seg}: {e}")
-
-            # Try fallback if configured
-            fallback_generator = factory.get_fallback_generator(config, backend)
-            if fallback_generator:
-                try:
-                    logging.info(f"Trying fallback generator for segment {seg}")
-                    fallback_generator.generate_video(
-                        prompt=prompt_text,
-                        input_image_path=keyframe_path,
-                        output_path=video_file,
-                        duration=segment_duration
-                    )
-                    video_paths.append(video_file)
-                    logging.info(f"Fallback succeeded for segment {seg}")
-                except Exception as fallback_error:
-                    logging.error(f"Fallback also failed for segment {seg}: {fallback_error}")
+                video_paths.append(video_file)
+                logging.info(f"Fallback succeeded for segment {seg}")
             else:
-                logging.error(f"No fallback available for segment {seg}")
-
-        except Exception as e:
-            logging.error(f"Unexpected error generating video for segment {seg}: {e}")
+                raise
 
     return video_paths
 
@@ -764,8 +1320,10 @@ def generate_video_segments_sequential(
     for item in video_prompts:
         seg, prompt_text = item["segment"], item["prompt"]
 
-        # Determine the first frame for this segment
-        if seg == 1:
+        # Prefer the reviewed plan's explicit frame, especially across cuts.
+        if item.get("first_frame"):
+            first_file = resolve_frame_reference(item["first_frame"], frames_dir)
+        elif seg == 1:
             # For the first segment, check if initial_image is provided
             if config.get("initial_image"):
                 initial_image = config.get("initial_image")
@@ -795,7 +1353,9 @@ def generate_video_segments_sequential(
                 raise FileNotFoundError(f"Previous frame not found: {first_file}")
 
         # Path for this segment's keyframe
-        last_file = os.path.join(frames_dir, f"segment_{seg:02d}.png")
+        last_file = resolve_frame_reference(item.get("last_frame"), frames_dir)
+        if not last_file:
+            last_file = os.path.join(frames_dir, f"segment_{seg:02d}.png")
         if not os.path.exists(last_file):
             logging.error(f"Keyframe not found: {last_file}")
             logging.error(f"Directory contents: {os.listdir(frames_dir)}")
@@ -886,85 +1446,24 @@ def enhance_prompt(prompt: str, config: Dict, output_dir: str) -> Dict:
 
     logging.info("Enhancing input prompt...")
 
-    # Extract configuration
-    api_key = config.get("openai_api_key")
-    base_url = config.get("openai_base_url")
-    model = config.get("prompt_enhancement_model", "gpt-4o-mini")
-    default_backend = config.get("default_backend", "wan2.1")
-
-    if not api_key:
+    if not config.get("openai_api_key") and config.get("enhanced_prompt") is None:
         logging.warning("No OpenAI API key provided, skipping prompt enhancement")
         return {"keyframe_prompts": [], "video_prompts": []}
 
-    # Check if using Minimax or Veo3 backend to add character limit constraint
-    backend_constraint = ""
-    if default_backend.lower() == "minimax":
-        backend_constraint = "\n\nIMPORTANT: When generating video prompts for Minimax backend, each video prompt must be 500 characters or less. Keep descriptions concise and focused while maintaining essential visual and action details."
-    elif default_backend.lower() == "veo3":
-        backend_constraint = "\n\nIMPORTANT: When generating video prompts for Veo3 backend, each video prompt must be 1000 characters or less. Keep descriptions concise and focused while maintaining essential visual and action details."
-
     try:
-        # Set up the OpenAI client
-        from openai import OpenAI
-        from instructor import from_openai, Mode
-
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-
-        client = OpenAI(**client_kwargs)
-        instructor_client = from_openai(client, mode=Mode.TOOLS)
-
-        # Define the messages with potential backend constraint
-        messages = [
-            {"role": "system", "content": PROMPT_ENHANCEMENT_INSTRUCTIONS + backend_constraint},
-            {"role": "user", "content": prompt}
-        ]
-
-        # Get enhanced prompts
-        logging.info(f"Making request to OpenAI API with model: {model}")
-
-        # Basic parameters that all models support
-        completion_params = {
-            "model": model,
-            "response_model": PromptEnhancementResult,
-            "messages": messages
-        }
-
-        # Only add temperature if not using o4-mini or gpt-5 (which don't support custom temperature)
-        if not (model.startswith("o4-mini") or "gpt-5" in model):
-            completion_params["temperature"] = 0.7
-            completion_params["seed"] = 42
-            logging.info(f"Using temperature=0.7 and seed=42 with model {model}")
-        else:
-            logging.info(f"Using default parameters for model {model} (no temperature/seed)")
-
-        # Make the API call with appropriate parameters
-        result = instructor_client.chat.completions.create(**completion_params)
-
-        # Convert to dict format
-        if hasattr(result, 'model_dump'):
-            result_dict = result.model_dump()
-        else:
-            result_dict = result.dict()
-
-        # The response is already in the right structure, add debugging output
-        print(f"DEBUG - Response keys: {result_dict.keys()}")
-
-        # Create a copy of the result to modify as needed
-        enhanced_data = result_dict
+        enhanced_data = enhance_prompt_data(prompt, config)
 
         # Display the enhanced segmented prompts in colors
         print(f"\n{Colors.BOLD}{Colors.PURPLE}Enhanced Prompt Segments:{Colors.RESET}")
 
         # Get the segment count from the segmentation logic
-        num_segments = result_dict["segmentation_logic"]["number_of_segments"]
+        num_segments = enhanced_data["segmentation_logic"]["number_of_segments"]
         print(f"DEBUG - Number of segments: {num_segments}")
 
         # Create formatted output for each segment
-        for i in range(len(result_dict["keyframe_prompts"])):
-            keyframe_info = result_dict["keyframe_prompts"][i]
-            video_info = result_dict["video_prompts"][i]
+        for i in range(len(enhanced_data["keyframe_prompts"])):
+            keyframe_info = enhanced_data["keyframe_prompts"][i]
+            video_info = enhanced_data["video_prompts"][i]
 
             segment_num = keyframe_info["segment"]
             keyframe_prompt = keyframe_info["prompt"]
@@ -1045,6 +1544,7 @@ def generate_video_chaining_mode(
 
     for idx, item in enumerate(video_prompts):
         seg, prompt_text = item["segment"], item["prompt"]
+        item_duration = item.get("duration_seconds", segment_duration)
 
         logging.info(f"Processing segment {seg}/{len(video_prompts)} in chaining mode")
 
@@ -1065,8 +1565,6 @@ def generate_video_chaining_mode(
                     raise FileNotFoundError(f"Initial image not found: {input_image}")
             else:
                 # No initial image provided, need to generate one
-                from keyframe_generator import generate_keyframe
-
                 # Create a starting frame using the first segment's prompt
                 logging.info("No initial image provided, generating one for first segment")
                 input_image = os.path.join(frames_dir, "segment_00.png")
@@ -1155,25 +1653,33 @@ def generate_video_chaining_mode(
 
         while attempt_generator:
             try:
-                logging.info(f"Attempting segment {seg} with {attempt_generator.get_backend_name()}...")
+                attempt_backend_name = attempt_generator.get_backend_name()
+                attempt_duration = get_provider_compatible_duration(
+                    config,
+                    config.get("default_backend", "wan2.1"),
+                    attempt_backend_name,
+                    item_duration,
+                )
+                logging.info(f"Attempting segment {seg} with {attempt_backend_name}...")
 
                 validation_errors = attempt_generator.validate_inputs(
                     prompt=prompt_text,
                     input_image_path=input_image,
-                    duration=segment_duration
+                    duration=attempt_duration
                 )
                 if validation_errors:
                     logging.error(f"Input validation failed for segment {seg} with {attempt_generator.get_backend_name()}: {validation_errors}")
                     raise InvalidInputError(f"Validation failed: {'; '.join(validation_errors)}")
 
-                generated_video_path = attempt_generator.generate_video(
+                generation_output = attempt_generator.generate_video(
                     prompt=prompt_text,
                     input_image_path=input_image,
                     output_path=video_file_output_path,
-                    duration=segment_duration,
+                    duration=attempt_duration,
                     frame_num=config.get("frame_num", 81) # Pass frame_num from main config if available
                 )
 
+                generated_video_path = os.fspath(generation_output)
                 if not generated_video_path or not os.path.exists(generated_video_path):
                     raise VideoGenerationError(f"Generator {attempt_generator.get_backend_name()} reported success but video file not found: {generated_video_path}")
 
@@ -1222,14 +1728,35 @@ def generate_video_chaining_mode(
 # Main Pipeline Function
 # ============================================================================
 
-def run_pipeline(config_path: str, prompt_override: str = None) -> None:
+from api.generation_ledger import legacy_provenance
+
+
+@legacy_provenance
+def run_pipeline(
+    config_path: str,
+    prompt_override: str = None,
+    duration_seconds: Optional[int] = None,
+    plan_only: bool = False,
+    enhanced_prompt_file: Optional[str] = None,
+    keyframes_only: bool = False,
+    reuse_keyframes: bool = False,
+) -> None:
     """Run the end-to-end pipeline using configuration from YAML"""
+    if plan_only and (keyframes_only or reuse_keyframes):
+        raise ValueError("--plan-only cannot be combined with keyframe generation options")
+    if keyframes_only and reuse_keyframes:
+        raise ValueError("--keyframes-only cannot be combined with --reuse-keyframes")
+    if reuse_keyframes and not enhanced_prompt_file:
+        raise ValueError("--reuse-keyframes requires --enhanced-prompt-file")
     logging.info(f"Loading configuration from {config_path}")
     base_config = load_config(config_path)
 
     # Use ConfigMerger to handle prompt override with proper precedence
     config_merger = ConfigMerger()
-    cli_args = {'prompt': prompt_override} if prompt_override else None
+    cli_args = {
+        "prompt": prompt_override,
+        "duration_seconds": duration_seconds,
+    }
     
     # Build effective configuration with CLI prompt override
     config = config_merger.build_effective_config(
@@ -1238,149 +1765,52 @@ def run_pipeline(config_path: str, prompt_override: str = None) -> None:
         http_overrides=None  # No HTTP overrides in CLI context
     )
 
+    if (keyframes_only or reuse_keyframes) and config.get(
+        "generation_mode", "keyframe"
+    ).lower() != "keyframe":
+        raise ValueError("Keyframe checkpoints require generation_mode=keyframe")
+
+    if enhanced_prompt_file:
+        with open(enhanced_prompt_file, "r") as file:
+            apply_reviewed_plan_config(config, json.load(file), duration_seconds)
+
+    # Reject unsupported or excessive requests before any generation work.
+    get_requested_segment_plan(config)
+
     base_dir = os.getcwd()  # Current working directory
     output_dir = os.path.join(base_dir, "output")
-    frames_dir = os.path.join(output_dir, "frames")
-    videos_dir = os.path.join(output_dir, "videos")
-
-    # Delete and recreate directories to ensure no nested subdirs
-    import shutil
-    if os.path.exists(frames_dir):
-        shutil.rmtree(frames_dir)
-    if os.path.exists(videos_dir):
-        shutil.rmtree(videos_dir)
-
-    # Create clean directories
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(frames_dir, exist_ok=True)
-    os.makedirs(videos_dir, exist_ok=True)
-
-    # Log directory structure
-    logging.info(f"Frames directory: {frames_dir}")
-    logging.info(f"Videos directory: {videos_dir}")
-
-    # Save a copy of the effective configuration (after merging)
-    with open(os.path.join(output_dir, 'config.yaml'), 'w') as f:
-        yaml.dump(config, f)
 
     # Step 1: Enhance the input prompt
     raw_prompt = config.get("prompt")
-    if not raw_prompt:
+    if not raw_prompt and not enhanced_prompt_file:
         raise ValueError("No prompt provided in configuration or command line")
 
     # Call the enhanced prompt function with colorful output
-    enhanced_data = enhance_prompt(raw_prompt, config, output_dir)
+    enhanced_data = enhance_prompt(raw_prompt or "Reviewed prompt plan", config, output_dir)
+    if plan_only:
+        if not enhanced_data.get("video_prompts"):
+            raise ValueError(
+                "--plan-only requires an OpenAI API key or --enhanced-prompt-file"
+            )
+        plan_path = os.path.join(output_dir, "enhanced_prompt.json")
+        if not os.path.isfile(plan_path):
+            raise RuntimeError(f"Plan was not written: {plan_path}")
+        return plan_path
 
-    # Step 2: Generate keyframes
-    logging.info("Generating keyframes...")
-    image_generation_model = config.get('image_generation_model')
-    # Get API keys from config
-    openai_api_key = config.get('openai_api_key')
-    stability_api_key = config.get('stability_api_key')
-    imageRouter_api_key = config.get('image_router_token')
-    gemini_api_key = config.get('gemini_api_key')
+    frames_dir = os.path.join(output_dir, "frames")
+    videos_dir = os.path.join(output_dir, "videos")
 
-    # Get keyframe generation settings
-    model_name = config.get('keyframe_prompt_model', 'dall-e-3')
-    image_size = config.get('image_size', '1024x1024')
+    # Delete and recreate directories only after the plan is approved.
+    if os.path.exists(frames_dir) and not reuse_keyframes:
+        shutil.rmtree(frames_dir)
+    if os.path.exists(videos_dir):
+        shutil.rmtree(videos_dir)
+    os.makedirs(frames_dir, exist_ok=True)
+    os.makedirs(videos_dir, exist_ok=True)
 
-    # Get I2I mode settings (now consolidated into main image generation)
-    reference_images_dir = config.get('reference_images_dir')
-    auto_generate_initial = config.get('auto_generate_initial', True)
-    keyframe_position = config.get('keyframe_position', 'first')
-
-    # Adjust image size for Stability AI if needed
-    if image_generation_model and "stability" in image_generation_model.lower():
-        image_size = "1024x1024"
-        logging.info(f"Using Stability AI image size: {image_size}")
-
-    initial_image = config.get('initial_image')
-
-    # Log which API will be used based on configured model
-    if image_generation_model:  # Check if image_generation_model is not None
-        if "openai" in image_generation_model.lower():
-            if config.get('openai_api_key'):
-                logging.info(f"Using OpenAI API ({image_generation_model}) for keyframe generation")
-            else:
-                logging.warning(f"Selected model {image_generation_model} but no OpenAI API key provided")
-        elif "stability" in image_generation_model.lower():
-            if stability_api_key:
-                logging.info(f"Using Stability AI API ({image_generation_model}) for keyframe generation")
-            else:
-                logging.warning(f"Selected model {image_generation_model} but no Stability AI API key provided")
-        elif imageRouter_api_key:
-            logging.info(f"Using ImageRouter API with model {image_generation_model} for keyframe generation")
-        else:
-            logging.warning("No suitable API keys provided for the selected image generation model")
-    else:
-        logging.warning("No image generation model specified in configuration")
-
-    # Check if we need to generate an initial frame (segment_00.png)
-    if not initial_image:
-        # Need to generate segment_00.png as our starting point
-        logging.info("No initial image provided, generating segment_00.png first")
-        print(f"\n{Colors.BOLD}{Colors.PURPLE}Generating Initial Frame (segment_00.png):{Colors.RESET}")
-
-        # Create a prompt for the initial frame based on the first segment
-        if len(enhanced_data['keyframe_prompts']) > 0:
-            first_segment_prompt = enhanced_data['keyframe_prompts'][0]['prompt']
-            # Create a starting frame prompt by modifying the first segment's prompt
-            initial_frame_prompt = f"First frame establishing shot: {first_segment_prompt}"
-
-            # Generate the initial frame using the prompt
-            from keyframe_generator import generate_keyframe_with_openai, generate_keyframe_with_stability
-
-            # Set up output path
-            frames_dir = os.path.join(output_dir, "frames")
-            os.makedirs(frames_dir, exist_ok=True)
-            initial_frame_path = os.path.join(frames_dir, "segment_00.png")
-
-            # Generate using appropriate API based on configured model
-            if "gemini" in image_generation_model.lower() and config.get('gemini_api_key'):
-                logging.info(f"Generating initial frame with Gemini: {initial_frame_prompt}")
-                try:
-                    generate_keyframe_with_gemini(
-                        prompt=initial_frame_prompt,
-                        output_path=initial_frame_path,
-                        gemini_api_key=config.get('gemini_api_key'),
-                        model_name=image_generation_model,
-                        max_retries=config.get('remote_api_settings', {}).get('max_retries', 3)
-                    )
-                    initial_image = initial_frame_path  # Use this as our initial image
-                    logging.info(f"Generated initial frame at {initial_frame_path}")
-                except Exception as e:
-                    logging.error(f"Failed to generate initial frame with Gemini: {e}")
-                    raise
-            elif "openai" in image_generation_model.lower() and config.get('openai_api_key'):
-                logging.info(f"Generating initial frame with OpenAI: {initial_frame_prompt}")
-                try:
-                    generate_keyframe_with_openai(
-                        prompt=initial_frame_prompt,
-                        output_path=initial_frame_path,
-                        openai_api_key=config.get('openai_api_key'),
-                        size=image_size
-                    )
-                    initial_image = initial_frame_path  # Use this as our initial image
-                    logging.info(f"Generated initial frame at {initial_frame_path}")
-                except Exception as e:
-                    logging.error(f"Failed to generate initial frame with OpenAI: {e}")
-                    raise
-            elif "stability" in image_generation_model.lower() and stability_api_key:
-                logging.info(f"Generating initial frame with Stability AI: {initial_frame_prompt}")
-                try:
-                    generate_keyframe_with_stability(
-                        prompt=initial_frame_prompt,
-                        output_path=initial_frame_path,
-                        stability_api_key=stability_api_key
-                    )
-                    initial_image = initial_frame_path  # Use this as our initial image
-                    logging.info(f"Generated initial frame at {initial_frame_path}")
-                except Exception as e:
-                    logging.error(f"Failed to generate initial frame with Stability AI: {e}")
-                    raise
-            else:
-                logging.error("Unable to generate initial frame, no suitable API keys provided")
-                raise ValueError("Cannot generate initial frame without OpenAI, Gemini, or Stability AI API keys")
+    logging.info(f"Frames directory: {frames_dir}")
+    logging.info(f"Videos directory: {videos_dir}")
 
     # Determine which generation mode we're using
     generation_mode = config.get('generation_mode', 'keyframe').lower()
@@ -1391,84 +1821,23 @@ def run_pipeline(config_path: str, prompt_override: str = None) -> None:
 
     if generation_mode == 'keyframe':
         # ----- KEYFRAME MODE -----
-        # Generate keyframes for first-last-frame to video generation
         logging.info(f"Starting keyframe generation for {len(enhanced_data['keyframe_prompts'])} segments")
         print(f"\n{Colors.BOLD}{Colors.PURPLE}Generating Keyframes:{Colors.RESET}")
 
-        # Generate keyframes sequentially for character consistency
-        keyframe_paths = generate_keyframes(
-            config=config,
-            keyframe_prompts=enhanced_data['keyframe_prompts'],
-            output_dir=frames_dir,
-            model_name=image_generation_model,
-            imageRouter_api_key=imageRouter_api_key,
-            stability_api_key=stability_api_key,
-            openai_api_key=config.get('openai_api_key'),
-            gemini_api_key=config.get('gemini_api_key'),
-            initial_image_path=initial_image,
-            image_size=image_size,
-            reference_images_dir=reference_images_dir,
-            max_retries=config.get('remote_api_settings', {}).get('max_retries', 3)
-        )
+        if reuse_keyframes:
+            validate_existing_keyframes(enhanced_data['video_prompts'], output_dir)
+            logging.info("Using reviewed keyframes from the existing output/frames directory")
+        else:
+            prepare_keyframes(
+                config,
+                keyframe_prompts=enhanced_data['keyframe_prompts'],
+                video_prompts=enhanced_data['video_prompts'],
+                output_dir=output_dir,
+            )
 
-        # Ensure segment_00.png exists before proceeding to video generation
-        # This is critical for the first segment to work correctly
-        segment_00_path = os.path.join(frames_dir, "segment_00.png")
-        if not os.path.exists(segment_00_path) and len(keyframe_paths) > 0:
-            logging.info(f"Creating segment_00.png as a copy of the first keyframe")
-            import shutil
-            try:
-                # Copy the first segment's keyframe as segment_00.png
-                shutil.copy2(keyframe_paths[0], segment_00_path)
-                logging.info(f"Created segment_00.png by copying {keyframe_paths[0]}")
-                # Verify the file exists after copy
-                if os.path.exists(segment_00_path):
-                    logging.info(f"Verified segment_00.png exists at {segment_00_path}")
-                else:
-                    logging.error(f"Failed to create segment_00.png after copy operation")
-            except Exception as e:
-                logging.error(f"Error creating segment_00.png: {e}")
-                # Try an alternative approach - create a symbolic link
-                try:
-                    os.symlink(keyframe_paths[0], segment_00_path)
-                    logging.info(f"Created symlink for segment_00.png pointing to {keyframe_paths[0]}")
-                except Exception as e2:
-                    logging.error(f"Error creating symlink: {e2}")
-
-        # Double-check the frames directory contents before video generation
-        logging.info(f"Frames directory contents before video generation: {os.listdir(frames_dir)}")
-
-        # Fix video prompt paths to use absolute paths to actual keyframe files
-        # The OpenAI prompt enhancement generates relative paths, but we need absolute paths
-        frames_dir_abs = os.path.abspath(frames_dir)
-        logging.info(f"Absolute frames directory path: {frames_dir_abs}")
-
-        # Map relative keyframe references to actual generated files
-        for i, prompt_item in enumerate(enhanced_data['video_prompts']):
-            # Fix first_frame path
-            if 'first_frame' in prompt_item:
-                first_frame_ref = prompt_item['first_frame']
-                if first_frame_ref == 'provided_start_image.png':
-                    # This should be segment_00.png
-                    prompt_item['first_frame'] = os.path.join(frames_dir_abs, 'segment_00.png')
-                elif first_frame_ref.startswith('segment_') and first_frame_ref.endswith('.png'):
-                    # Convert relative segment reference to absolute path
-                    prompt_item['first_frame'] = os.path.join(frames_dir_abs, first_frame_ref)
-                else:
-                    # For any other reference, try to resolve it
-                    prompt_item['first_frame'] = os.path.join(frames_dir_abs, first_frame_ref)
-                logging.info(f"Updated first_frame for segment {prompt_item.get('segment', i)}: {prompt_item['first_frame']}")
-
-            # Fix last_frame path
-            if 'last_frame' in prompt_item:
-                last_frame_ref = prompt_item['last_frame']
-                if last_frame_ref.startswith('segment_') and last_frame_ref.endswith('.png'):
-                    # Convert relative segment reference to absolute path
-                    prompt_item['last_frame'] = os.path.join(frames_dir_abs, last_frame_ref)
-                else:
-                    # For any other reference, try to resolve it
-                    prompt_item['last_frame'] = os.path.join(frames_dir_abs, last_frame_ref)
-                logging.info(f"Updated last_frame for segment {prompt_item.get('segment', i)}: {prompt_item['last_frame']}")
+        if keyframes_only:
+            logging.info(f"Keyframe checkpoint complete: {frames_dir}")
+            return frames_dir
 
         # Get FLF2V model directory for keyframe mode
         flf2v_model_dir = config.get('flf2v_model_dir', './Wan2.1-FLF2V-14B-720P')
@@ -1535,10 +1904,11 @@ def run_pipeline(config_path: str, prompt_override: str = None) -> None:
         logging.info(f"Video segment {i+1}: {path}")
 
     # Stitch video segments together if we have more than one
-    if len(video_paths) > 1:
+    trim_duration = get_trim_duration_seconds(config)
+    if len(video_paths) > 1 or trim_duration is not None:
         logging.info("Stitching video segments together...")
         final_output = os.path.join(output_dir, "final_video.mp4")
-        stitched_video = stitch_video_segments(video_paths, final_output)
+        stitched_video = stitch_video_segments(video_paths, final_output, trim_duration)
         if stitched_video:
             logging.info(f"Final stitched video saved to: {final_output}")
         else:
@@ -1561,9 +1931,44 @@ def main():
                        help='Path to the pipeline configuration file')
     parser.add_argument('--prompt', type=str,
                        help='Override the prompt from the config file')
+    parser.add_argument(
+        '--duration-seconds',
+        type=int,
+        help=(
+            'Requested final runtime in seconds '
+            f'(Veo 3 only; max {MAX_REQUESTED_DURATION_SECONDS})'
+        ),
+    )
+    parser.add_argument(
+        '--plan-only',
+        action='store_true',
+        help='Write output/enhanced_prompt.json and stop before media generation',
+    )
+    parser.add_argument(
+        '--enhanced-prompt-file',
+        help='Use a reviewed enhanced prompt JSON file instead of decomposing again',
+    )
+    parser.add_argument(
+        '--keyframes-only',
+        action='store_true',
+        help='Generate output/frames and stop before video generation',
+    )
+    parser.add_argument(
+        '--reuse-keyframes',
+        action='store_true',
+        help='Generate video from reviewed keyframes already in output/frames',
+    )
 
     args = parser.parse_args()
-    run_pipeline(args.config, args.prompt)
+    run_pipeline(
+        args.config,
+        args.prompt,
+        args.duration_seconds,
+        args.plan_only,
+        args.enhanced_prompt_file,
+        args.keyframes_only,
+        args.reuse_keyframes,
+    )
 
 if __name__ == "__main__":
     main()

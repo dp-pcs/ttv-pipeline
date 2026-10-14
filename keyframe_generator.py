@@ -18,10 +18,13 @@ import requests
 from typing import Optional, Dict, Any
 import time
 
-from PIL import Image
-import google.generativeai as genai
+from PIL import Image, ImageOps
+from google import genai
+from google.genai import types
 
 # Terminal colors for pretty output
+from video_generator_interface import recorded_keyframe, set_generation_details, BillingObservation
+
 class Colors:
     GREEN = '\033[92m'
     BLUE = '\033[94m'
@@ -57,7 +60,9 @@ def generate_keyframe_with_imageRouter(prompt, output_path, model_name, imageRou
         
         # Make the request
         logging.info("Sending request to ImageRouter API")
+        set_generation_details(provider="imagerouter",model=model_name,reference_paths=(),parameters={"quality":"auto"},prompt=prompt)
         response = requests.post(url, json=payload, headers=headers)
+        set_generation_details(provider_request_id=response.headers.get("x-request-id"))
         response.raise_for_status()  # Raise an error for bad status codes
         
         # Parse the response
@@ -154,7 +159,9 @@ def generate_keyframe_with_stability(prompt, output_path, stability_api_key, inp
                     logging.info(f"With prompt: {prompt}")
                     
                     # Send request
+                    set_generation_details(provider="stability",model="stable-diffusion-xl-1024-v1-0",prompt=prompt,reference_paths=(temp_img_path,),parameters={k:v for k,v in data.items() if "text_prompts" not in k})
                     response = requests.post(url, headers=headers, files=files, data=data)
+                    set_generation_details(provider_request_id=response.headers.get("x-request-id"))
                     logging.info(f"Response status code: {response.status_code}")
                     
             except Exception as e:
@@ -186,7 +193,9 @@ def generate_keyframe_with_stability(prompt, output_path, stability_api_key, inp
             logging.info(f"With prompt: {prompt}")
             
             # Send request
+            set_generation_details(provider="stability",model="stable-diffusion-xl-1024-v1-0",prompt=prompt,reference_paths=(),parameters={k:v for k,v in payload.items() if k!="text_prompts"})
             response = requests.post(url, headers=headers, json=payload)
+            set_generation_details(provider_request_id=response.headers.get("x-request-id"))
             logging.info(f"Response status code: {response.status_code}")
         
         # Better error handling
@@ -256,7 +265,7 @@ def reword_prompt_for_safety(prompt, openai_api_key):
         from openai import OpenAI
         
         # Initialize OpenAI client
-        client = OpenAI(api_key=openai_api_key)
+        client = OpenAI(api_key=openai_api_key, max_retries=0)
         
         # Create a system message that asks for rewording
         system_message = """
@@ -303,7 +312,7 @@ def generate_keyframe_with_openai(prompt, output_path, openai_api_key, input_ima
     
     try:
         # Initialize OpenAI client
-        client = OpenAI(api_key=openai_api_key)
+        client = OpenAI(api_key=openai_api_key, max_retries=0)
         
         if input_image_path and os.path.exists(input_image_path):
             # Image-to-image generation
@@ -338,7 +347,11 @@ def generate_keyframe_with_openai(prompt, output_path, openai_api_key, input_ima
                             print(f"\n{Colors.BOLD}Reworded prompt:{Colors.RESET} {Colors.YELLOW}{prompt}{Colors.RESET}")
                     
                     # Make the API call
+                    set_generation_details(provider="openai",model="gpt-image-1",prompt=prompt,reference_paths=tuple(p for p in (input_image_path, mask_path) if p and os.path.isfile(p)),parameters={"n":1,"size":size})
                     response = client.images.edit(**edit_args)
+                    usage = getattr(response, "usage", None)
+                    raw = usage.model_dump_json() if hasattr(usage, "model_dump_json") else None
+                    set_generation_details(provider_request_id=getattr(response,"_request_id",None),billing=BillingObservation(raw_unit_name="token_usage" if raw else None,raw_units=raw))
                     break  # If successful, exit retry loop
                 except Exception as e:
                     logging.error(f"Error on attempt {retry+1}: {e}")
@@ -374,12 +387,16 @@ def generate_keyframe_with_openai(prompt, output_path, openai_api_key, input_ima
                             print(f"\n{Colors.BOLD}Reworded prompt:{Colors.RESET} {Colors.YELLOW}{prompt}{Colors.RESET}")
                     
                     # Make the API call
+                    set_generation_details(provider="openai",model="gpt-image-1",prompt=prompt,reference_paths=(),parameters={"n":1,"size":size})
                     response = client.images.generate(
                         model="gpt-image-1",
                         prompt=prompt,
                         n=1,
                         size=size
                     )
+                    usage = getattr(response, "usage", None)
+                    raw = usage.model_dump_json() if hasattr(usage, "model_dump_json") else None
+                    set_generation_details(provider_request_id=getattr(response,"_request_id",None),billing=BillingObservation(raw_unit_name="token_usage" if raw else None,raw_units=raw))
                     break  # If successful, exit retry loop
                 except Exception as e:
                     logging.error(f"Error on attempt {retry+1}: {e}")
@@ -413,7 +430,9 @@ def generate_keyframe_with_gemini(
     input_image_path: Optional[str] = None,
     reference_images_dir: Optional[str] = None,
     model_name: str = "gemini-2.5-flash-image",
-    max_retries: int = 2
+    max_retries: int = 2,
+    aspect_ratio: str | None = None,
+    image_size: str | None = None,
 ) -> str:
     """
     Generate a keyframe using Google's Gemini API.
@@ -430,25 +449,28 @@ def generate_keyframe_with_gemini(
     Returns:
         Path to the generated image
     """
+    client = None
     try:
-        # Configure Gemini API
-        genai.configure(api_key=gemini_api_key)
-        
-        # Initialize the model
-        generation_config = {
-            "temperature": 0.9,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-        }
-        
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config=generation_config
+        client = genai.Client(api_key=gemini_api_key)
+        # Without an image config Gemini picks its own canvas (usually square), and an
+        # image-to-video model then generates on that canvas instead of the delivery shape.
+        image_config = (
+            types.ImageConfig(aspect_ratio=aspect_ratio, image_size=image_size)
+            if aspect_ratio or image_size
+            else None
+        )
+        generation_config = types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            temperature=0.9,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+            image_config=image_config,
         )
         
         # Build prompt with reference images if provided
         prompt_parts = []
+        submitted_references = []
         
         # Add reference images from directory for consistency
         if reference_images_dir and os.path.isdir(reference_images_dir):
@@ -460,12 +482,18 @@ def generate_keyframe_with_gemini(
                     if os.path.exists(image_path):
                         # Validate that the reference image is valid before using it
                         try:
-                            from PIL import Image
                             img = Image.open(image_path)
                             img.verify()  # Verify it's a valid image
                             with open(image_path, "rb") as f:
                                 image_data = f.read()
-                            prompt_parts.append(genai.upload_file(image_path, mime_type=mimetypes.guess_type(image_path)[0]))
+                            prompt_parts.append(
+                                types.Part.from_bytes(
+                                    data=image_data,
+                                    mime_type=mimetypes.guess_type(image_path)[0]
+                                    or "application/octet-stream",
+                                )
+                            )
+                            submitted_references.append(image_path)
                             # Use filename without extension as reference name
                             ref_name = os.path.splitext(filename)[0]
                             prompt_parts.append(f"{ref_name} reference")
@@ -477,14 +505,20 @@ def generate_keyframe_with_gemini(
         if input_image_path and os.path.exists(input_image_path):
             # Validate that the input image is valid before using it
             try:
-                from PIL import Image
                 img = Image.open(input_image_path)
                 img.verify()  # Verify it's a valid image
                 logging.info(f"Using input image for I2I: {input_image_path}")
                 with open(input_image_path, "rb") as f:
                     input_image_data = f.read()
-                prompt_parts.append(genai.upload_file(input_image_path, mime_type=mimetypes.guess_type(input_image_path)[0]))
+                prompt_parts.append(
+                    types.Part.from_bytes(
+                        data=input_image_data,
+                        mime_type=mimetypes.guess_type(input_image_path)[0]
+                        or "application/octet-stream",
+                    )
+                )
                 prompt_parts.append("Base image for editing")
+                submitted_references.append(input_image_path)
             except Exception as verify_error:
                 logging.error(f"Input image is invalid: {verify_error}")
                 raise Exception(f"Cannot use invalid input image: {input_image_path}")
@@ -501,22 +535,30 @@ def generate_keyframe_with_gemini(
                     time.sleep(2 ** retry)
                 
                 # Generate content
-                response = model.generate_content(prompt_parts)
+                set_generation_details(provider="gemini",model=model_name,reference_paths=tuple(submitted_references),prompt="\n".join(part for part in prompt_parts if isinstance(part,str)),parameters={"response_modalities":"IMAGE","temperature":0.9,"top_p":0.95,"top_k":40,"max_output_tokens":8192,"aspect_ratio":aspect_ratio,"image_size":image_size})
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_parts,
+                    config=generation_config,
+                )
                 
+                usage=getattr(response,"usage_metadata",None)
+                raw=usage.model_dump_json() if hasattr(usage,"model_dump_json") else None
+                set_generation_details(provider_request_id=getattr(response,"response_id",None),model_version=getattr(response,"model_version",None),billing=BillingObservation(raw_unit_name="token_usage" if raw else None,raw_units=raw))
                 # Log detailed response information for debugging
-                logging.info(f"Gemini API response received. Candidates: {len(response.candidates) if response.candidates else 0}")
-                if response.candidates:
-                    logging.info(f"First candidate parts: {len(response.candidates[0].content.parts) if response.candidates[0].content and response.candidates[0].content.parts else 0}")
-                    for i, part in enumerate(response.candidates[0].content.parts):
+                response_parts = response.parts or []
+                logging.info(f"Gemini API response received. Parts: {len(response_parts)}")
+                if response_parts:
+                    for i, part in enumerate(response_parts):
                         logging.info(f"Part {i}: type={type(part)}, has_inline_data={hasattr(part, 'inline_data')}")
                         if hasattr(part, 'inline_data') and part.inline_data:
                             logging.info(f"Part {i}: inline_data length={len(part.inline_data.data) if part.inline_data.data else 0}")
                 
                 # Check if response contains an image
-                if response.candidates and response.candidates[0].content.parts:
+                if response_parts:
                     # Find the part with the largest inline_data (most likely to be the image)
                     image_parts = []
-                    for part in response.candidates[0].content.parts:
+                    for part in response_parts:
                         if hasattr(part, 'inline_data') and part.inline_data:
                             image_parts.append(part)
                     
@@ -544,17 +586,36 @@ def generate_keyframe_with_gemini(
                         
                         # Create directory if it doesn't exist
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                        
-                        # Save the image
-                        with open(output_path, "wb") as f:
-                            f.write(image_bytes)
+
+                        # The API may return JPEG bytes for a requested .png path.
+                        # Normalize the bytes so downstream MIME detection is truthful.
+                        image = Image.open(io.BytesIO(image_bytes))
+                        image.load()
+                        if input_image_path and os.path.exists(input_image_path):
+                            with Image.open(input_image_path) as input_image:
+                                expected_size = input_image.size
+                            if image.size != expected_size:
+                                logging.info(
+                                    "Normalizing edited frame from %s to %s",
+                                    image.size,
+                                    expected_size,
+                                )
+                                image = ImageOps.fit(
+                                    image,
+                                    expected_size,
+                                    method=getattr(Image, "Resampling", Image).LANCZOS,
+                                )
+                        if Path(output_path).suffix.lower() == ".png":
+                            image.save(output_path, format="PNG")
+                        else:
+                            image.save(output_path)
                         
                         # Validate that the saved image is valid
                         try:
-                            from PIL import Image
                             img = Image.open(output_path)
                             img.verify()  # Verify it's a valid image
                             logging.info(f"Image saved and verified: {output_path}")
+                            client.close()
                             return os.path.abspath(output_path)
                         except Exception as verify_error:
                             logging.error(f"Generated image is invalid: {verify_error}")
@@ -581,11 +642,111 @@ def generate_keyframe_with_gemini(
                     raise
             
     except Exception as e:
+        if client is not None:
+            client.close()
         logging.error(f"Error using Gemini API: {e}")
         raise
 
-def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3):
+def _crop_to_aspect(image, aspect_ratio):
+    """Center-crop to W:H when the provider's canvas differs from the delivery shape."""
+    if not aspect_ratio:
+        return image, None
+    w_r, h_r = (float(x) for x in str(aspect_ratio).split(":"))
+    target = w_r / h_r
+    w, h = image.size
+    if abs(w / h - target) < 0.01:
+        return image, None
+    if w / h > target:
+        nw = round(h * target)
+        box = ((w - nw) // 2, 0, (w - nw) // 2 + nw, h)
+    else:
+        nh = round(w / target)
+        box = (0, (h - nh) // 2, w, (h - nh) // 2 + nh)
+    return image.crop(box), box
+
+
+def generate_keyframe_with_gateway(prompt, output_path, model_name, gateway, input_image_path=None,
+                                   reference_images_dir=None, aspect_ratio=None, max_retries=0):
+    """Generate a keyframe through an OpenAI-compatible Images API behind a configurable gateway.
+
+    ``gateway`` comes from the ``image_generation_gateway`` config block: ``base_url``,
+    ``api_key_env`` (the name of the environment variable holding the key, read at call time and
+    never stored in configuration), optional ``default_headers``, ``size`` and ``quality``.
+    The returned canvas is center-cropped to the scene's delivery aspect ratio when it differs.
+    """
+    from urllib.parse import urlparse
+
+    from openai import OpenAI
+
+    key_env = gateway.get("api_key_env") or "OPENAI_API_KEY"
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        raise ValueError(f"Image gateway key variable {key_env} is not set")
+    base_url = gateway.get("base_url")
+    client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0,
+                    default_headers=dict(gateway.get("default_headers") or {}))
+    size = gateway.get("size") or "1536x1024"
+    references = []
+    if input_image_path and os.path.exists(input_image_path):
+        references.append(input_image_path)
+    if reference_images_dir and os.path.isdir(reference_images_dir):
+        references += sorted(
+            os.path.join(reference_images_dir, name) for name in os.listdir(reference_images_dir)
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        )
+    parameters = {"size": size, "aspect_ratio": aspect_ratio, "gateway": urlparse(base_url or "").netloc or None}
+    request = {"model": model_name, "prompt": prompt, "n": 1, "size": size}
+    if gateway.get("quality"):
+        request["quality"] = parameters["quality"] = gateway["quality"]
+    set_generation_details(provider="openai-compatible", model=model_name, prompt=prompt,
+                           reference_paths=tuple(references), parameters=parameters)
+    for attempt in range(max_retries + 1):
+        try:
+            if references:
+                files = [open(path, "rb") for path in references]
+                try:
+                    response = client.images.edit(image=files if len(files) > 1 else files[0], **request)
+                finally:
+                    for handle in files:
+                        handle.close()
+            else:
+                response = client.images.generate(**request)
+            break
+        except Exception:
+            if attempt == max_retries:
+                raise
+            time.sleep(2 ** attempt)
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        data = base64.b64decode(item.b64_json)
+    elif getattr(item, "url", None):
+        download = requests.get(item.url, timeout=120)
+        download.raise_for_status()
+        data = download.content
+    else:
+        raise Exception("Image gateway returned no image data")
+    usage = getattr(response, "usage", None)
+    raw = usage.model_dump_json() if hasattr(usage, "model_dump_json") else None
+    set_generation_details(provider_request_id=getattr(response, "_request_id", None),
+                           billing=BillingObservation(raw_unit_name="token_usage" if raw else None, raw_units=raw))
+    image = Image.open(io.BytesIO(data))
+    image.load()
+    image, box = _crop_to_aspect(image, aspect_ratio)
+    if box:
+        set_generation_details(parameters={**parameters, "center_crop": list(box)})
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    image.save(output_path, format="PNG")
+    return str(Path(output_path).resolve())
+
+
+GEMINI_IMAGE_SIZES = {"1K", "2K", "4K"}
+
+
+def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, input_image_path=None, mask_path=None, size=None, create_mask=False, reference_images_dir=None, max_retries=3, allow_provider_fallback=True, aspect_ratio=None, gateway=None):
     """Wrapper function to generate a keyframe using the appropriate API"""
+    if gateway:
+        return generate_keyframe_with_gateway(prompt, output_path, model_name, gateway, input_image_path=input_image_path,
+                                              reference_images_dir=reference_images_dir, aspect_ratio=aspect_ratio, max_retries=max_retries)
     # Import Colors class for colored output
     from pipeline import Colors
     
@@ -611,7 +772,9 @@ def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None,
                 input_image_path=input_image_path,
                 reference_images_dir=reference_images_dir,
                 model_name=model_name,
-                max_retries=max_retries
+                max_retries=max_retries,
+                aspect_ratio=aspect_ratio,
+                image_size=size if size in GEMINI_IMAGE_SIZES else None,
             )
         # Use Gemini for T2I if no reference images provided
         else:
@@ -620,7 +783,9 @@ def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None,
                 output_path=output_path,
                 gemini_api_key=gemini_api_key,
                 model_name=model_name,
-                max_retries=max_retries
+                max_retries=max_retries,
+                aspect_ratio=aspect_ratio,
+                image_size=size if size in GEMINI_IMAGE_SIZES else None,
             )
     # Use OpenAI if specified and API key is provided
     elif "openai" in model_name.lower() and openai_api_key:
@@ -651,7 +816,8 @@ def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None,
             openai_api_key=openai_api_key, 
             input_image_path=input_image_path,
             mask_path=mask_path,
-            size=openai_size
+            size=openai_size,
+            max_retries=max_retries
         )
     
     # Use Stability AI if specifically requested
@@ -663,7 +829,7 @@ def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None,
         return generate_keyframe_with_imageRouter(prompt, output_path, model_name, imageRouter_api_key)
     
     # Final fallback - use Stability AI if available and no specific API was requested
-    elif stability_api_key:
+    elif stability_api_key and allow_provider_fallback:
         logging.warning(f"Model '{model_name}' not recognized or no API key available, using Stability AI as fallback")
         return generate_keyframe_with_stability(prompt, output_path, stability_api_key, input_image_path)
     
@@ -684,6 +850,20 @@ def generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None,
         else:
             raise ValueError(f"Model '{model_name}' not supported. Supported models contain: gemini, openai, stability, sd, imagerouter.")
 
+generate_keyframe_output = recorded_keyframe(_generate_keyframe)
+
+
+def generate_keyframe(prompt, output_path, model_name, **kwargs):
+    # Legacy callers keep a path return while each image call gains structured provenance.
+    max_retries = kwargs.pop("max_retries", 3)
+    for attempt in range(max_retries + 1):
+        try:
+            return os.fspath(generate_keyframe_output(prompt, output_path, model_name=model_name, max_retries=0, **kwargs))
+        except Exception:
+            if attempt == max_retries:
+                raise
+            time.sleep(min(2 ** attempt, 8))
+
 def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRouter_api_key=None, stability_api_key=None, openai_api_key=None, gemini_api_key=None, initial_image_path=None, image_size=None, reference_images_dir=None, max_retries=3):
     """Generate all keyframes sequentially from a JSON file with prompt data for character consistency"""
     
@@ -698,8 +878,11 @@ def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRo
     
     # Force a clean start
     if os.path.exists(output_dir):
+        initial_image = os.path.abspath(initial_image_path) if initial_image_path else None
         for f in os.listdir(output_dir):
             if f.startswith("segment_") and f.endswith(".png"):
+                if os.path.abspath(os.path.join(output_dir, f)) == initial_image:
+                    continue
                 try:
                     os.remove(os.path.join(output_dir, f))
                 except:
@@ -721,10 +904,12 @@ def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRo
     # Variable to track the previous image path for sequential generation
     prev_image_path = initial_image_path
     
-    # Generate each keyframe sequentially, using the previous keyframe as input
+    # Continue within a scene; reset image conditioning at explicit cuts.
     for item in sorted(data["keyframe_prompts"], key=lambda x: x.get("segment", 0)):
         segment = item.get("segment")
         prompt = item.get("prompt")
+        transition = item.get("transition", "continue")
+        start_prompt = item.get("start_prompt")
         
         if not segment or not prompt:
             logging.warning(f"Skipping invalid keyframe prompt item: {item}")
@@ -738,8 +923,40 @@ def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRo
         # The keyframe message is already shown in colored output
         
         try:
-            # Generate keyframe image
-            if prev_image_path:
+            if transition == "cut":
+                if not start_prompt:
+                    raise ValueError(f"Cut segment {segment} requires start_prompt")
+                start_path = os.path.join(output_dir, f"segment_{segment:02d}_start.png")
+                logging.info(f"Generating independent scene start: {start_path}")
+                generate_keyframe(
+                    prompt=start_prompt,
+                    output_path=start_path,
+                    model_name=model_name,
+                    imageRouter_api_key=imageRouter_api_key,
+                    stability_api_key=stability_api_key,
+                    openai_api_key=openai_api_key,
+                    gemini_api_key=gemini_api_key,
+                    input_image_path=None,
+                    size=image_size,
+                    create_mask=False,
+                    reference_images_dir=reference_images_dir,
+                    max_retries=max_retries,
+                )
+                generated_file = generate_keyframe(
+                    prompt=prompt,
+                    output_path=output_path,
+                    model_name=model_name,
+                    imageRouter_api_key=imageRouter_api_key,
+                    stability_api_key=stability_api_key,
+                    openai_api_key=openai_api_key,
+                    gemini_api_key=gemini_api_key,
+                    input_image_path=start_path,
+                    size=image_size,
+                    create_mask=False,
+                    reference_images_dir=reference_images_dir,
+                    max_retries=max_retries,
+                )
+            elif prev_image_path:
                 # Only keep one of the prev image messages
                 logging.info(f"Using previous keyframe as input: {prev_image_path}")
                 generated_file = generate_keyframe(
@@ -757,12 +974,7 @@ def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRo
                     reference_images_dir=reference_images_dir,
                     max_retries=max_retries
                 )
-            else:
-                # For first keyframe, use initial image if provided
-                initial_input = initial_image_path if segment == 1 and initial_image_path else None
-                if initial_input:
-                    logging.info(f"Using initial image as input for first keyframe: {initial_input}")
-                
+            elif segment == 1:
                 generated_file = generate_keyframe(
                     prompt=prompt,
                     output_path=output_path,
@@ -771,11 +983,15 @@ def generate_keyframes_from_json(json_file, output_dir, model_name=None, imageRo
                     stability_api_key=stability_api_key,
                     openai_api_key=openai_api_key,
                     gemini_api_key=gemini_api_key,
-                    input_image_path=initial_input,
+                    input_image_path=None,
                     size=image_size,
                     create_mask=False,
                     reference_images_dir=reference_images_dir,
-                    max_retries=max_retries
+                    max_retries=max_retries,
+                )
+            else:
+                raise ValueError(
+                    f"Continue segment {segment} has no previous or initial frame"
                 )
             
             generated_files.append(generated_file)

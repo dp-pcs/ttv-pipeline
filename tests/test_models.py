@@ -38,8 +38,8 @@ class TestJobModels:
     
     def test_job_create_request_too_long(self):
         """Test that overly long prompts are rejected"""
-        long_prompt = "x" * 2001  # Exceeds 2000 character limit
-        
+        long_prompt = "x" * 10001  # Exceeds 10000 character limit
+
         with pytest.raises(ValidationError):
             JobCreateRequest(prompt=long_prompt)
     

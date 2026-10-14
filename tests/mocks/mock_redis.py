@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from unittest.mock import Mock
 
 from api.models import JobData, JobStatus, JobCreateRequest
+from api.config import redact_config_secrets
 
 
 class MockRedisManager:
@@ -95,8 +96,12 @@ class MockJobQueue:
             id=job_id,
             status=JobStatus.QUEUED,
             created_at=created_at,
-            prompt=request.prompt,
-            config=effective_config
+            prompt=(
+                request.prompt
+                or effective_config.get("prompt")
+                or "Resumed from reviewed prompt plan"
+            ),
+            config=redact_config_secrets(effective_config)
         )
         
         self.jobs[job_id] = job_data

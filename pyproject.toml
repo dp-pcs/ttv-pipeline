@@ -7,7 +7,7 @@ name = "ttv-pipeline-api"
 version = "0.1.0"
 description = "TTV Pipeline API Server with HTTP/3 support"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     # API Server dependencies
     "fastapi>=0.104.0",
@@ -32,12 +32,10 @@ dependencies = [
     "pillow>=9.0.0",
     "requests>=2.28.0",
     "python-dotenv>=1.0.0",
-    "stability-sdk>=0.6.0",
-    "google-generativeai>=0.8.0",
     "runwayml>=3.1.0",
     "google-genai>=0.1.0",
     "google-auth>=2.23.0",
-    "aiohttp>=3.8.0",
+    "aiohttp>=3.14.3",
     "tenacity>=8.2.0",
 ]
 
@@ -53,6 +51,19 @@ dev = [
     "mypy>=1.7.0",
     "ruff>=0.1.0",
 ]
+
+[tool.setuptools]
+py-modules = ["frame_extractor", "keyframe_generator", "pipeline", "video_generator_interface"]
+
+[tool.uv]
+exclude-newer = "7 days"
+constraint-dependencies = ["cryptography>=50.0.2", "h2>=4.4.1", "multidict>=6.9.1", "urllib3>=2.8.0"]
+
+[tool.setuptools.package-data]
+api = ["contracts/v1_0/*.json", "contracts/v1_0/*.md", "contracts/v1_0/fixtures/*.json"]
+
+[tool.setuptools.packages.find]
+include = ["api*", "generators*", "workers*"]
 
 [tool.pytest.ini_options]
 # Test discovery
@@ -82,7 +93,7 @@ addopts = [
 ]
 
 # Asyncio configuration
-asyncio_mode = "auto"
+asyncio_mode = "strict"
 
 # Filtering
 filterwarnings = [
@@ -96,7 +107,7 @@ minversion = "6.0"
 
 [tool.black]
 line-length = 100
-target-version = ['py311']
+target-version = ['py314']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -122,7 +133,7 @@ use_parentheses = true
 ensure_newline_before_comments = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -148,7 +159,9 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
+
+[tool.ruff.lint]
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
@@ -164,7 +177,7 @@ ignore = [
     "C901",  # too complex
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/*" = ["B011"]
 

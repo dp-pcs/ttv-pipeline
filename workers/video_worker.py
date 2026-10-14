@@ -16,20 +16,15 @@ import os
 import subprocess
 import threading
 import tempfile
-import yaml
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 from contextlib import contextmanager
-from pathlib import Path
 
 from api.queue import get_job_queue, initialize_queue_infrastructure
 from api.models import JobStatus
-from api.config_merger import ConfigMerger
-from api.config import get_config_from_env
+from api.config import get_config_from_env, restore_job_config_secrets
 
 # Import Trio components with fallback
 try:
-    import trio
-    from .trio_executor import get_trio_executor, initialize_trio_executor
     from .trio_video_worker import process_video_job_trio_wrapper
     TRIO_AVAILABLE = True
     logger = logging.getLogger(__name__)
@@ -203,39 +198,6 @@ def check_cancellation(cancellation_token: CancellationToken, job_id: str) -> bo
     return False
 
 
-def _ensure_queue_infrastructure():
-    """
-    Ensure queue infrastructure is initialized for worker processes.
-    
-    This function initializes the queue infrastructure if it hasn't been
-    initialized yet. It's called at the start of each job to ensure
-    the worker has access to the job queue.
-    """
-    from api.queue import get_job_queue, initialize_queue_infrastructure
-    from api.config import RedisConfig, get_config_from_env
-    
-    try:
-        # Try to get existing queue instance
-        get_job_queue()
-        logger.debug("Queue infrastructure already initialized")
-        return
-    except RuntimeError:
-        # Queue not initialized, initialize it now
-        logger.info("Initializing queue infrastructure for worker")
-        
-        try:
-            # Get configuration from environment
-            config = get_config_from_env()
-            
-            # Initialize queue infrastructure
-            initialize_queue_infrastructure(config.redis)
-            logger.info("Queue infrastructure initialized successfully in worker")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize queue infrastructure in worker: {e}")
-            raise
-
-
 def process_video_job(job_id: str, use_trio: bool = True) -> str:
     """
     Process a video generation job with cancellation support and pipeline integration.
@@ -257,9 +219,12 @@ def process_video_job(job_id: str, use_trio: bool = True) -> str:
     logger.info(f"Starting video generation job {job_id}")
     start_time = time.time()
     
-    # Ensure queue infrastructure is initialized
+    # Ensure queue infrastructure is initialized once per worker process.
     ensure_queue_initialized()
-    _ensure_queue_infrastructure()
+    integration_job = get_job_queue().get_job(job_id)
+    if integration_job and integration_job.config.get("generation_v2") is True:
+        from api.generation_service import run_queued_generation
+        return run_queued_generation(job_id, get_job_queue())
     
     try:
         # Use Trio structured concurrency if available and requested
@@ -273,6 +238,8 @@ def process_video_job(job_id: str, use_trio: bool = True) -> str:
                 _record_job_metrics(processing_time, success=True)
                 
                 return result
+            except InterruptedError:
+                raise
             except Exception as e:
                 logger.warning(f"Trio execution failed for job {job_id}, falling back to threading: {e}")
                 # Fall through to threading-based execution
@@ -334,7 +301,7 @@ def process_video_job_threading(job_id: str) -> str:
             
             # Extract configuration and prompt
             prompt = job_data.prompt
-            effective_config = job_data.config
+            effective_config = restore_job_config_secrets(job_data.config)
             
             logger.info(f"Processing job {job_id} with prompt: {prompt[:100]}...")
             logger.info(f"Using effective configuration with {len(effective_config)} parameters")
@@ -386,6 +353,10 @@ def process_video_job_threading(job_id: str) -> str:
             raise
 
 
+from api.generation_ledger import legacy_provenance
+
+
+@legacy_provenance
 def execute_pipeline_with_config(
     job_id: str,
     prompt: str,
@@ -433,13 +404,6 @@ def execute_pipeline_with_config(
             job_queue.update_job_status(job_id, JobStatus.PROGRESS, progress=5)
             job_queue.add_job_log(job_id, "Setting up pipeline configuration")
             
-            # Write job-specific configuration to temporary file for logging
-            job_config_path = os.path.join(temp_dir, "job_config.yaml")
-            with open(job_config_path, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False)
-            
-            logger.info(f"Job configuration written to {job_config_path}")
-            
             # Phase 2: Import and initialize pipeline (10%)
             if check_cancellation(cancellation_token, job_id):
                 raise InterruptedError("Job cancelled during pipeline initialization")
@@ -449,28 +413,11 @@ def execute_pipeline_with_config(
             
             # Import pipeline functions
             from pipeline import (
-                load_config, PromptEnhancer, generate_keyframes, 
-                generate_video_segments, stitch_video_segments,
-                PROMPT_ENHANCEMENT_INSTRUCTIONS
+                enhance_prompt_data,
+                get_trim_duration_seconds,
+                stitch_video_segments,
             )
-            
-            # Load base configuration from mounted pipeline_config.yaml
-            base_config_path = "/app/pipeline_config.yaml"
-            if not os.path.exists(base_config_path):
-                logger.error(f"Base pipeline config not found at {base_config_path}")
-                raise FileNotFoundError(f"Pipeline configuration not found at {base_config_path}")
-            
-            base_config = load_config(base_config_path)
-            
-            # Use ConfigMerger to ensure proper precedence (HTTP prompt overrides config)
-            config_merger = ConfigMerger()
-            final_config = config_merger.merge_for_job(base_config, prompt)
-
-            # Add environment variable fallbacks for API keys
-            if not final_config.get('gemini_api_key'):
-                final_config['gemini_api_key'] = os.getenv('GEMINI_API_KEY')
-            if not final_config.get('openai_api_key'):
-                final_config['openai_api_key'] = os.getenv('OPENAI_API_KEY')
+            final_config = config
 
             logger.info(f"Final configuration merged with prompt override")
             logger.info(f"Image generation model from config: {final_config.get('image_generation_model')}")
@@ -484,33 +431,24 @@ def execute_pipeline_with_config(
             job_queue.update_job_status(job_id, JobStatus.PROGRESS, progress=20)
             job_queue.add_job_log(job_id, "Enhancing and segmenting prompt")
 
-            # Try to use OpenAI for prompt enhancement, fall back to basic segmentation if unavailable
+            # Enhance and segment the prompt, falling back to basic segmentation if the
+            # enhancement provider is unavailable
             try:
-                # Initialize prompt enhancer
-                enhancer = PromptEnhancer(
-                    api_key=final_config.get('openai_api_key'),
-                    base_url=final_config.get('openai_base_url', 'https://api.openai.com/v1'),
-                    model=final_config.get('prompt_enhancement_model', 'gpt-4o-mini')
-                )
-
-                # Enhance and segment the prompt
-                enhancement_result = enhancer.enhance(PROMPT_ENHANCEMENT_INSTRUCTIONS, prompt)
-
+                enhancement_result = enhance_prompt_data(prompt, final_config)
                 keyframe_prompts = enhancement_result['keyframe_prompts']
                 video_prompts = enhancement_result['video_prompts']
 
-                logger.info(f"Generated {len(keyframe_prompts)} keyframe prompts and {len(video_prompts)} video prompts (OpenAI enhanced)")
+                logger.info(f"Generated {len(keyframe_prompts)} keyframe prompts and {len(video_prompts)} video prompts")
 
             except Exception as e:
-                # OpenAI unavailable - use basic fallback segmentation
-                logger.warning(f"OpenAI enhancement unavailable, using basic segmentation: {str(e)[:100]}")
-                job_queue.add_job_log(job_id, "Using basic prompt segmentation (OpenAI unavailable)")
+                logger.warning(f"Prompt enhancement unavailable, using basic segmentation: {str(e)[:100]}")
+                job_queue.add_job_log(job_id, "Using basic prompt segmentation (enhancement unavailable)")
 
                 # Simple fallback: use the full prompt as a single video segment
                 keyframe_prompts = [{"segment": 1, "prompt": prompt}]
                 video_prompts = [{"segment": 1, "prompt": prompt, "first_frame": None, "last_frame": None}]
 
-                logger.info(f"Using basic segmentation: 1 segment (OpenAI unavailable)")
+                logger.info(f"Using basic segmentation: 1 segment (enhancement unavailable)")
             
             # Phase 4: Keyframe generation (50%)
             if check_cancellation(cancellation_token, job_id):
@@ -522,6 +460,7 @@ def execute_pipeline_with_config(
             # Generate keyframes with progress tracking
             keyframe_paths = generate_keyframes_with_progress(
                 keyframe_prompts=keyframe_prompts,
+                video_prompts=video_prompts,
                 config=final_config,
                 output_dir=job_output_dir,
                 cancellation_token=cancellation_token,
@@ -532,6 +471,42 @@ def execute_pipeline_with_config(
             )
             
             logger.info(f"Generated {len(keyframe_paths)} keyframes")
+
+            if final_config.get("keyframes_only"):
+                if check_cancellation(cancellation_token, job_id):
+                    raise InterruptedError("Job cancelled before storyboard upload")
+
+                job_queue.update_job_status(job_id, JobStatus.PROGRESS, progress=90)
+                job_queue.add_job_log(job_id, "Uploading keyframe storyboard artifact")
+                from api.config import GCSConfig
+                from workers.gcs_uploader import (
+                    create_keyframe_storyboard_archive,
+                    upload_named_job_artifact,
+                )
+
+                archive_path = create_keyframe_storyboard_archive(
+                    job_output_dir, enhancement_result
+                )
+                gcs_uri = upload_named_job_artifact(
+                    local_file_path=archive_path,
+                    job_id=job_id,
+                    gcs_config=GCSConfig(
+                        bucket=final_config.get('gcs_bucket', 'ttv-api-artifacts'),
+                        prefix=final_config.get('gcs_prefix', 'ttv-api'),
+                        credentials_path=final_config.get(
+                            'credentials_path', 'credentials.json'
+                        ),
+                        signed_url_expiration=final_config.get(
+                            'signed_url_expiration', 3600
+                        ),
+                    ),
+                    artifact_name="keyframe_storyboard.zip",
+                )
+                if not gcs_uri:
+                    raise Exception("Storyboard upload returned None - upload failed")
+                job_queue.update_job_status(job_id, JobStatus.PROGRESS, progress=95)
+                job_queue.add_job_log(job_id, f"Storyboard upload completed: {gcs_uri}")
+                return gcs_uri
             
             # Phase 5: Video segment generation (80%)
             if check_cancellation(cancellation_token, job_id):
@@ -564,7 +539,11 @@ def execute_pipeline_with_config(
             
             # Stitch segments together
             final_video_path = os.path.join(job_output_dir, "final_video.mp4")
-            stitched_path = stitch_video_segments(video_paths, final_video_path)
+            stitched_path = stitch_video_segments(
+                video_paths,
+                final_video_path,
+                get_trim_duration_seconds(final_config),
+            )
             
             if not stitched_path or not os.path.exists(stitched_path):
                 raise Exception("Failed to stitch video segments")
@@ -608,6 +587,7 @@ def execute_pipeline_with_config(
 
 def generate_keyframes_with_progress(
     keyframe_prompts: List[str],
+    video_prompts: List[Dict],
     config: Dict[str, Any],
     output_dir: str,
     cancellation_token: CancellationToken,
@@ -632,27 +612,18 @@ def generate_keyframes_with_progress(
     Returns:
         List of keyframe file paths
     """
-    from pipeline import generate_keyframes
+    from pipeline import prepare_keyframes
     
     # Check for cancellation before starting
     if check_cancellation(cancellation_token, job_id):
         raise InterruptedError("Job cancelled before keyframe generation")
     
     try:
-        # Generate keyframes using existing pipeline function
-        keyframe_paths = generate_keyframes(
-            keyframe_prompts=keyframe_prompts,
+        keyframe_paths = prepare_keyframes(
             config=config,
+            keyframe_prompts=keyframe_prompts,
+            video_prompts=video_prompts,
             output_dir=output_dir,
-            model_name=config.get('image_generation_model'),
-            imageRouter_api_key=config.get('image_router_api_key'),
-            stability_api_key=config.get('stability_api_key'),
-            openai_api_key=config.get('openai_api_key'),
-            gemini_api_key=config.get('gemini_api_key'),
-            initial_image_path=config.get('initial_image'),
-            image_size=config.get('image_size'),
-            reference_images_dir=config.get('reference_images_dir'),
-            max_retries=3
         )
         
         # Update progress
@@ -709,7 +680,8 @@ def generate_video_segments_with_progress(
             video_paths = generate_video_segments_single_keyframe(
                 config=config,
                 video_prompts=video_prompts,
-                output_dir=output_dir
+                output_dir=output_dir,
+                cancellation_check=cancellation_token.is_cancelled,
             )
         else:
             # Use local Wan2.1 generation

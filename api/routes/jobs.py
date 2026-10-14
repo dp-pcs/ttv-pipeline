@@ -4,24 +4,35 @@ Job management routes for the API server.
 This module contains the job creation, status, and management endpoints.
 """
 
-from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
-import uuid
-import httpx
+import mimetypes
 import os
+from datetime import datetime, timedelta, timezone
+from typing import List
 
+import httpx
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+from api.config_merger import ConfigMerger
+from api.exceptions import APIException
 from api.models import (
-    JobCreateRequest, JobCreateResponse, JobStatusResponse,
-    ArtifactResponse, LogsResponse, JobCancelResponse, JobStatus,
+    ArtifactResponse, LogsResponse, JobCancelResponse,
     JobEstimateRequest, JobEstimateResponse, JobDetailsResponse
 )
-from api.exceptions import APIException
 from api.logging_config import get_logger
+from api.models import (
+    JobCreateRequest,
+    JobCreateResponse,
+    JobStatus,
+    JobStatusResponse,
+    PlanCreateRequest,
+    PromptEnhancementResult,
+)
+from api.queue import JobQueue
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["jobs"])
+plans_router = APIRouter(tags=["plans"])
 
 
 def get_app_state(request: Request) -> dict:
@@ -141,76 +152,137 @@ async def estimate_job_cost(
         )
 
 
-@router.post("/", response_model=JobCreateResponse, status_code=202)
-async def create_job(
+@plans_router.post(
+    "",
+    response_model=PromptEnhancementResult,
+    response_model_exclude_unset=True,
+)
+def create_plan(
     request_obj: Request,
-    request: JobCreateRequest,
-    background_tasks: BackgroundTasks
-) -> JobCreateResponse:
+    request: PlanCreateRequest,
+) -> PromptEnhancementResult:
+    """Create an editable prompt plan without starting media generation."""
+    api_config = getattr(request_obj.app.state, "config", None)
+    if not api_config or not isinstance(api_config.pipeline_config, dict):
+        raise HTTPException(status_code=503, detail="Pipeline configuration not available")
+
+    effective_config = ConfigMerger().merge_for_job(
+        api_config.pipeline_config,
+        request.prompt,
+        request.duration_seconds,
+    )
+    if not effective_config.get("openai_api_key") and not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Prompt enhancement credentials are not configured",
+        )
+
+    from pipeline import enhance_prompt_data
+
+    try:
+        return PromptEnhancementResult.model_validate(
+            enhance_prompt_data(request.prompt, effective_config)
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("", response_model=JobCreateResponse, status_code=202)
+async def create_job(request_obj: Request, request: JobCreateRequest) -> JobCreateResponse:
     """
     Create a new video generation job.
 
-    Accepts only a prompt parameter and returns immediately with a task ID.
+    Accepts a prompt and optional requested duration, then returns a task ID.
     The job is queued for processing and can be monitored via the status endpoint.
     """
-    from api.queue import JobQueue
-    
-    from pipeline import load_config
-
     # Get job queue from app state
-    job_queue: JobQueue = getattr(request_obj.app.state, 'job_queue', None)
+    job_queue: JobQueue = getattr(request_obj.app.state, "job_queue", None)
     if not job_queue:
         raise HTTPException(status_code=503, detail="Job queue not available")
 
-    # Load pipeline config to get default_backend
-    base_config_path = "/app/pipeline_config.yaml"
-    if not os.path.exists(base_config_path):
-        raise HTTPException(status_code=500, detail="Pipeline configuration not found")
+    api_config = getattr(request_obj.app.state, "config", None)
+    if not api_config or not isinstance(api_config.pipeline_config, dict):
+        raise HTTPException(status_code=503, detail="Pipeline configuration not available")
 
-    base_config = load_config(base_config_path)
-    default_backend = base_config.get('default_backend', 'veo3')
+    job_prompt = request.prompt or "Resumed from reviewed prompt plan"
+    effective_config = ConfigMerger().merge_for_job(
+        api_config.pipeline_config,
+        job_prompt,
+        request.duration_seconds,
+    )
+    effective_config["title"] = request.title  # Custom job title
+    if request.enhanced_prompt is not None:
+        from pipeline import apply_reviewed_plan_config
 
-    # Create and queue the job with basic configuration
-    effective_config = {
-        "prompt": request.prompt,
-        "title": request.title,  # Custom job title
-        "generator": default_backend,  # Use configured default backend
-        "parameters": {}
-    }
-    
+        reviewed_plan = request.enhanced_prompt.model_dump(exclude_unset=True)
+        apply_reviewed_plan_config(
+            effective_config, reviewed_plan, request.duration_seconds
+        )
+    if request.keyframes_only:
+        effective_config["keyframes_only"] = True
+        if effective_config.get("generation_mode", "keyframe").lower() != "keyframe":
+            raise HTTPException(
+                status_code=422,
+                detail="keyframes_only requires generation_mode=keyframe",
+            )
+    effective_config.update(
+        {
+            "gcs_bucket": api_config.gcs.bucket,
+            "gcs_prefix": api_config.gcs.prefix,
+            "credentials_path": api_config.gcs.credentials_path,
+            "signed_url_expiration": api_config.gcs.signed_url_expiration,
+        }
+    )
+
+    from pipeline import (
+        get_duration_tradeoff,
+        get_requested_job_timeout,
+        validate_prompt_enhancement,
+    )
+
+    try:
+        if request.enhanced_prompt is not None:
+            validate_prompt_enhancement(
+                effective_config["enhanced_prompt"], effective_config
+            )
+        tradeoff = get_duration_tradeoff(effective_config)
+        job_timeout = get_requested_job_timeout(effective_config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
     job = job_queue.enqueue_job(
         request=request,
-        effective_config=effective_config
+        effective_config=effective_config,
+        job_timeout=job_timeout,
     )
-    
-    logger.info(f"Created job {job.id} with prompt: {request.prompt[:50]}...")
-    
+
+    logger.info(f"Created job {job.id} with prompt: {job_prompt[:50]}...")
+
     return JobCreateResponse(
         id=job.id,
         status=job.status,
-        created_at=job.created_at
+        created_at=job.created_at,
+        warnings=[tradeoff] if tradeoff else [],
     )
 
 
-@router.get("/", response_model=List[JobStatusResponse])
+@router.get("", response_model=List[JobStatusResponse])
 async def list_jobs(
-    request_obj: Request,
-    limit: int = 100,
-    offset: int = 0
+    request_obj: Request, limit: int = 100, offset: int = 0
 ) -> List[JobStatusResponse]:
     """
     List recent jobs with pagination.
-    
+
     Returns a list of job status objects ordered by creation time.
     """
     # Get job queue from app state
-    job_queue: JobQueue = getattr(request_obj.app.state, 'job_queue', None)
+    job_queue: JobQueue = getattr(request_obj.app.state, "job_queue", None)
     if not job_queue:
         raise HTTPException(status_code=503, detail="Job queue not available")
-    
+
     # Get jobs list from queue
     jobs = job_queue.list_jobs(limit=limit, offset=offset)
-    
+
     return [job.to_status_response() for job in jobs]
 
 
@@ -264,13 +336,14 @@ async def get_job_details(
 
 
 @router.get("/{job_id}/video-url")
-async def get_job_video_url(
+@router.get("/{job_id}/artifact-url")
+async def get_job_artifact_url(
     request_obj: Request,
     job_id: str,
     expiration_seconds: int = 3600
 ) -> dict:
     """
-    Get a signed video URL for a completed job's video.
+    Get a signed URL and media metadata for a completed job artifact.
     
     Returns a time-limited signed URL that can be used to stream or embed the video
     directly from Google Cloud Storage without authentication.
@@ -305,7 +378,7 @@ async def get_job_video_url(
     if not job.gcs_uri:
         raise HTTPException(
             status_code=404, 
-            detail="No video artifact found for this job"
+            detail="No artifact found for this job"
         )
     
     # Create GCS client and generate signed URL
@@ -326,18 +399,25 @@ async def get_job_video_url(
         
         logger.info(f"Generated signed URL for job {job_id}, expires at {expiration_time}")
         
-        return {
-            "video_url": signed_url,
+        artifact_name = os.path.basename(job.gcs_uri)
+        mime_type = mimetypes.guess_type(artifact_name)[0] or "application/octet-stream"
+        response = {
+            "artifact_url": signed_url,
+            "artifact_name": artifact_name,
             "expires_at": expiration_time.isoformat(),
             "expiration_seconds": expiration_seconds,
-            "mime_type": "video/mp4"
+            "mime_type": mime_type,
+            "artifact_role": "scene_preview" if mime_type.startswith("video/") else "keyframe_storyboard",
         }
+        if mime_type.startswith("video/"):
+            response["video_url"] = signed_url
+        return response
         
     except Exception as e:
         logger.error(f"Failed to generate signed URL for job {job_id}: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to generate video URL"
+            detail="Failed to generate artifact URL"
         )
 
 

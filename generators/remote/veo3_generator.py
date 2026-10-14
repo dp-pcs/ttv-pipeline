@@ -12,11 +12,8 @@ Veo 3.1 capabilities (https://ai.google.dev/gemini-api/docs/video):
 
 import os
 import time
-import json
-import logging
 import mimetypes
-from typing import Dict, Any, List, Optional
-from pathlib import Path
+from typing import Dict, Any, List
 
 # Google Cloud imports
 try:
@@ -39,63 +36,64 @@ except ImportError:
 
 from google.cloud import storage
 from google.oauth2 import service_account
-from PIL import Image
-
 from video_generator_interface import (
+    recorded_generation, set_generation_details, replace_generation_reference, BillingObservation, GenerationOutput,
     VideoGeneratorInterface,
     VideoGenerationError,
-    APIError,
-    GenerationTimeoutError,
     InvalidInputError,
-    QuotaExceededError
 )
 from generators.base import (
     ImageValidator,
     RetryHandler,
     ProgressMonitor,
-    download_file,
     format_duration
 )
 
 class Veo3Generator(VideoGeneratorInterface):
     """Remote video generator using Google Veo 3.1 API"""
     
-    # Model name for Veo 3.1 (default)
-    MODEL_NAME = "veo-3.1-generate-preview"
-    
-    # Available Veo models
-    AVAILABLE_MODELS = [
-        "veo-3.1-generate-preview",      # Latest with FLF, extension, reference images
-        "veo-3.1-fast-generate-preview", # Fast version of 3.1
-        "veo-3.0-generate-001",          # Stable Veo 3
-        "veo-3.0-fast-generate-001",     # Fast Veo 3
-        "veo-2.0-generate-001",          # Veo 2 (legacy)
-    ]
-    
-    # Pricing estimates per second (placeholder values - actual pricing TBD)
+    # Vertex AI and Gemini Developer API model names.
+    MODEL_NAME = "veo-3.1-generate-001"
+    FAST_MODEL_NAME = "veo-3.1-fast-generate-001"
+    API_MODEL_NAME = "veo-3.1-generate-preview"
+    API_FAST_MODEL_NAME = "veo-3.1-fast-generate-preview"
+    SUPPORTED_DURATIONS = [4, 6, 8]
+
     PRICING = {
-        "veo-3.1-generate-preview": 0.75,
-        "veo-3.1-fast-generate-preview": 0.50,
-        "veo-3.0-generate-preview": 0.75,
-        "veo-3.0-generate-001": 0.75,
-        "veo-3.0-fast-generate-001": 0.50,
-        "veo-2.0-generate-001": 0.50,
+        "veo-3.1-generate-001": 0.50,
+        "veo-3.1-fast-generate-001": 0.50,
+        "veo-3.1-generate-preview": 0.40,
+        "veo-3.1-fast-generate-preview": 0.10,
+        "veo-3.1-lite-generate-preview": 0.05,
     }
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        self.api_key = config.get("api_key")
         self.project_id = config.get("project_id")
         self.region = config.get("region", "global")  # Veo 3 is available in global region
         self.credentials_path = config.get("credentials_path", "credentials.json")
         self.output_bucket = config.get("output_bucket")
         self.max_retries = config.get("max_retries", 3)
         self.timeout = config.get("timeout", 600)
-        self.model_name = config.get("veo_model", self.MODEL_NAME)  # Use config model or fallback to default
+        configured_model = config.get("veo_model")
+        if self.api_key and configured_model:
+            configured_model = {
+                self.MODEL_NAME: self.API_MODEL_NAME,
+                self.FAST_MODEL_NAME: self.API_FAST_MODEL_NAME,
+            }.get(configured_model, configured_model)
+            if configured_model not in {self.API_MODEL_NAME, self.API_FAST_MODEL_NAME}:
+                raise VideoGenerationError(
+                    f"Unsupported Gemini API Veo model: {configured_model}"
+                )
+        self.model_name = configured_model or (
+            self.API_MODEL_NAME if self.api_key else self.MODEL_NAME
+        )
         
-        if not self.project_id:
-            raise VideoGenerationError("Google Cloud project ID is required")
+        if not self.api_key and not self.project_id:
+            raise VideoGenerationError("Google API key or Google Cloud project ID is required")
         
-        if not self.output_bucket:
+        if not self.api_key and not self.output_bucket:
             self.output_bucket = f"{self.project_id}-veo3-outputs"
             self.logger.info(f"No output bucket specified, using default: {self.output_bucket}")
         
@@ -108,6 +106,12 @@ class Veo3Generator(VideoGeneratorInterface):
     def _init_clients(self):
         """Initialize Google Cloud clients"""
         try:
+            if self.api_key:
+                self.genai_client = genai.Client(api_key=self.api_key)
+                self.storage_client = None
+                self.logger.info("Gemini Developer API client initialized successfully")
+                return
+
             # Set environment variables for Google Gen AI SDK
             os.environ["GOOGLE_CLOUD_PROJECT"] = self.project_id
             os.environ["GOOGLE_CLOUD_LOCATION"] = self.region
@@ -136,54 +140,42 @@ class Veo3Generator(VideoGeneratorInterface):
             raise VideoGenerationError(f"Failed to initialize Veo 3 client: {e}")
     
     def get_capabilities(self) -> Dict[str, Any]:
-        """Return Google Veo 3.1 capabilities"""
-        # Check if using Veo 3.1 (supports FLF and more features)
-        is_veo_31 = "3.1" in self.model_name or "3.1" in self.MODEL_NAME
-        
+        """Return Google Veo 3 capabilities"""
         return {
-            "max_duration": 8.0,  # Veo 3.1 supports 4, 6, or 8 seconds
-            "supported_durations": [4, 6, 8],  # Available duration options
-            "supported_resolutions": ["720p", "1080p"],  # 1080p only for 8s
-            "supported_aspect_ratios": ["16:9", "9:16"],  # Veo 3.1 aspect ratios
+            "supported_durations": self.SUPPORTED_DURATIONS,
+            "supported_resolutions": ["16:9", "9:16"],  # Aspect ratios
             "supports_image_to_video": True,
-            "supports_text_to_video": True,  # Veo 3.1 supports T2V
-            "supports_first_last_frame": is_veo_31,  # FLF interpolation (Veo 3.1+)
-            "supports_video_extension": is_veo_31,  # Video extension (Veo 3.1 only)
-            "supports_reference_images": is_veo_31,  # Up to 3 reference images (Veo 3.1 only)
+            "supports_first_last_frame": True,
+            "supports_text_to_video": False,  # Currently only image-to-video
             "requires_gpu": False,  # API-based
             "api_based": True,
-            "models": {model: True for model in self.AVAILABLE_MODELS},
-            "current_model": self.model_name,
+            "models": {
+                self.model_name: True
+            },
             "features": {
                 "motion_control": True,
                 "style_transfer": True,
                 "camera_control": True,
                 "object_tracking": True,
-                "temporal_consistency": True,
-                "native_audio": True,  # Veo 3+ generates audio
-                "dialogue_generation": is_veo_31,  # Natural dialogue
-            },
-            # FLF-specific constraints
-            "flf_constraints": {
-                "required_duration": 8,  # FLF mode requires 8 second duration
-                "supported_aspect_ratios": ["16:9", "9:16"],
+                "temporal_consistency": True
             }
         }
     
-    def estimate_cost(self, duration: float, resolution: str = "1920x1080") -> float:
-        """Estimate cost for video generation"""
-        # Get price per second for the model
-        price_per_second = self.PRICING.get(self.model_name, 0.10)
-        
-        # Resolution multiplier
-        resolution_multipliers = {
-            "1024x1024": 1.0,
-            "1920x1080": 1.2,
-            "1080x1920": 1.2
+    def estimate_cost(self, duration: float, resolution: str | None = None) -> float | None:
+        """Estimate the configured resolution; unrecognized pricing remains unknown."""
+        resolution = resolution or self.config.get("resolution", "720p")
+        resolution = {"1280x720": "720p", "1920x1080": "1080p", "3840x2160": "4k"}.get(resolution, resolution)
+        # Gemini Developer API pricing: https://ai.google.dev/gemini-api/docs/pricing
+        preview_prices = {
+            self.API_MODEL_NAME: {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
+            self.API_FAST_MODEL_NAME: {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
+            "veo-3.1-lite-generate-preview": {"720p": 0.05, "1080p": 0.08},
         }
-        multiplier = resolution_multipliers.get(resolution, 1.0)
-        
-        return duration * price_per_second * multiplier
+        if self.model_name in preview_prices:
+            rate = preview_prices[self.model_name].get(resolution)
+        else:
+            rate = self.PRICING.get(self.model_name) if resolution in {"720p", "1080p"} else None
+        return duration * rate if rate is not None else None
     
     def validate_inputs(self, 
                        prompt: str, 
@@ -216,169 +208,115 @@ class Veo3Generator(VideoGeneratorInterface):
                             f"Recommended: 16:9, 9:16, or 1:1")
         
         # Validate duration
-        capabilities = self.get_capabilities()
-        if duration > capabilities["max_duration"]:
-            errors.append(f"Duration {duration}s exceeds maximum {capabilities['max_duration']}s")
-        elif duration < 1:
-            errors.append("Duration must be at least 1 second")
+        resolution = self.config.get("resolution", "720p")
+        if resolution in {"1080p", "4k"} and duration != 8:
+            errors.append(f"{resolution} Veo generation requires an 8-second duration")
+        elif duration not in self.SUPPORTED_DURATIONS:
+            errors.append(f"Duration must be one of {self.SUPPORTED_DURATIONS} seconds")
         
         return errors
     
+    @recorded_generation("veo3")
     def generate_video(self,
                       prompt: str,
                       input_image_path: str,
                       output_path: str,
                       duration: float = 8.0,
-                      end_image_path: str = None,
-                      **kwargs) -> str:
+                      **kwargs) -> GenerationOutput:
         """
-        Generate video using Google Veo 3.1 API
-        
+        Generate video using Google Veo 3 API
+
         Args:
             prompt: Text prompt describing the desired video
-            input_image_path: Path to the input/reference image (first frame)
+            input_image_path: Path to the input/reference image
             output_path: Path where the generated video should be saved
-            duration: Desired duration of the video in seconds (4, 6, or 8)
-            end_image_path: Optional path to the last frame image for FLF interpolation mode.
-                           When provided, Veo 3.1 will generate video that transitions from
-                           input_image_path (first frame) to end_image_path (last frame).
-                           Note: FLF mode requires duration=8 seconds.
+            duration: Desired duration of the video in seconds
             **kwargs: Additional parameters:
-                - aspect_ratio: "16:9" or "9:16" (default: "16:9")
-                - resolution: "720p" or "1080p" (default: "720p")
-                - negative_prompt: Text describing what to avoid
-                - reference_images: List of up to 3 reference image paths (Veo 3.1 only)
-        
+                - aspect_ratio: "16:9", "9:16", or "1:1" (default: auto-detected)
+                - motion_strength: "low", "medium", "high" (default: "medium")
+
         Returns:
             Path to the generated video file
         """
-        # Check if FLF mode is requested
-        is_flf_mode = end_image_path is not None
-        
-        if is_flf_mode:
-            self.logger.info("First-Last-Frame (FLF) interpolation mode enabled")
-            # FLF mode requires 8 second duration per API spec
-            if duration != 8:
-                self.logger.warning(f"FLF mode requires 8 second duration, adjusting from {duration}s")
-                duration = 8
-        
         # Validate inputs
         validation_errors = self.validate_inputs(prompt, input_image_path, duration)
         if validation_errors:
             raise InvalidInputError(f"Input validation failed: {'; '.join(validation_errors)}")
-        
-        # Validate end image if provided
-        if is_flf_mode:
-            end_image_validation = ImageValidator.validate_image(end_image_path, max_size_mb=10.0)
-            if not end_image_validation["valid"]:
-                raise InvalidInputError(f"End image validation failed: {'; '.join(end_image_validation['errors'])}")
-        
+
+        last_frame_path = kwargs.get("last_frame_path")
+        set_generation_details(reference_paths=tuple(p for p in (input_image_path, last_frame_path) if p))
+        if last_frame_path:
+            last_frame_validation = ImageValidator.validate_image(last_frame_path, max_size_mb=10.0)
+            if not last_frame_validation["valid"]:
+                raise InvalidInputError(
+                    f"Last frame validation failed: {'; '.join(last_frame_validation['errors'])}"
+                )
+
         # Log cost estimate
         estimated_cost = self.estimate_cost(duration)
-        self.logger.info(f"Estimated cost: ${estimated_cost:.2f}")
-        
+        if estimated_cost is None:
+            self.logger.info("Estimated cost unavailable")
+        else:
+            self.logger.info(f"Estimated cost: ${estimated_cost:.2f}")
+
         # Ensure output directory exists
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        
+
         # Get video aspect ratio from config (veo3 only supports 16:9 and 9:16)
         video_aspect_ratio = kwargs.get('aspect_ratio', self.config.get('video_aspect_ratio', '16:9'))
         if video_aspect_ratio not in ['16:9', '9:16']:
-            self.logger.warning(f"Invalid video aspect ratio {video_aspect_ratio}, defaulting to 16:9")
-            video_aspect_ratio = '16:9'
-        
-        # Get resolution
-        resolution = kwargs.get('resolution', '720p')
-        if resolution not in ['720p', '1080p']:
-            self.logger.warning(f"Invalid resolution {resolution}, defaulting to 720p")
-            resolution = '720p'
-        
-        mode_str = "FLF interpolation" if is_flf_mode else "image-to-video"
-        self.logger.info(f"Using {mode_str} mode with aspect ratio: {video_aspect_ratio}, resolution: {resolution}")
-        
+            raise InvalidInputError(f"Unsupported Veo aspect ratio: {video_aspect_ratio}")
+
+        self.logger.info(f"Using video aspect ratio: {video_aspect_ratio}")
+
         try:
-            # Create a unique output GCS URI for this generation
-            output_gcs_uri = self._create_output_gcs_uri()
-            
-            # Ensure the output bucket exists
-            self._ensure_bucket_exists(self.output_bucket)
-            
-            # Prepare the first frame image
-            first_image = self._prepare_image(input_image_path, kwargs.get("use_local_file", False))
-            
-            # Prepare the last frame image if FLF mode
-            last_image = None
-            if is_flf_mode:
-                last_image = self._prepare_image(end_image_path, kwargs.get("use_local_file", False))
-                self.logger.info("Prepared both first and last frame images for FLF generation")
-            
+            def request_image(path):
+                mime_type, _ = mimetypes.guess_type(path)
+                mime_type = mime_type or "image/jpeg"
+                if self.api_key or kwargs.get("use_local_file", False):
+                    return GenAIImage.from_file(location=path, mime_type=mime_type)
+                return GenAIImage(gcs_uri=self._upload_to_gcs(path), mime_type="image/jpeg")
+
+            image = request_image(input_image_path)
+            last_frame = request_image(last_frame_path) if last_frame_path else None
+
             # Submit the generation request
             self.logger.info(f"Submitting video generation request to {self.model_name}...")
-            
+
             # Create the configuration
-            config_params = {
+            config_args = {
                 "aspect_ratio": video_aspect_ratio,
-                "output_gcs_uri": output_gcs_uri,
-                "resolution": resolution,
+                "duration_seconds": int(duration),
+                "last_frame": last_frame,
             }
-            
-            # Add duration if supported by the config class
-            if duration in [4, 6, 8]:
-                config_params["duration_seconds"] = int(duration)
-            
-            # Add negative prompt if provided
-            if kwargs.get("negative_prompt"):
-                config_params["negative_prompt"] = kwargs["negative_prompt"]
-            
-            config = GenerateVideosConfig(**config_params)
-            
+            if self.api_key:
+                config_args.update(
+                    resolution=self.config.get("resolution", "720p"),
+                    person_generation="allow_adult",
+                )
+            else:
+                output_gcs_uri = self._create_output_gcs_uri()
+                self._ensure_bucket_exists(self.output_bucket)
+                config_args["output_gcs_uri"] = output_gcs_uri
+            config = GenerateVideosConfig(**config_args)
+
             # Use the asynchronous API call and wait for completion
             progress_monitor = ProgressMonitor(100)
             progress_monitor.update(0, "Submitting video generation request...")
-            
-            # Build the API call arguments
-            api_kwargs = {
+
+            request_args = {
                 "model": self.model_name,
-                "image": first_image,
+                "image": image,
                 "prompt": prompt,
                 "config": config,
             }
-            
-            # Try FLF mode if requested, with fallback to I2V if SDK doesn't support it
-            flf_attempted = False
-            if is_flf_mode and last_image:
-                # Check if SDK supports lastFrame parameter by inspecting the method signature
-                import inspect
-                try:
-                    sig = inspect.signature(self.genai_client.models.generate_videos)
-                    if 'lastFrame' in sig.parameters or 'last_frame' in sig.parameters:
-                        api_kwargs["lastFrame"] = last_image
-                        flf_attempted = True
-                        self.logger.info("Added lastFrame parameter for FLF interpolation")
-                    else:
-                        self.logger.warning("SDK does not support lastFrame parameter, falling back to I2V mode")
-                except Exception as e:
-                    self.logger.warning(f"Could not inspect SDK signature: {e}, trying FLF anyway")
-                    api_kwargs["lastFrame"] = last_image
-                    flf_attempted = True
-            
-            # Try to generate video, with fallback if FLF fails
-            try:
-                operation = self.retry_handler.retry_with_backoff(
-                    self.genai_client.models.generate_videos,
-                    **api_kwargs
-                )
-            except TypeError as e:
-                if "lastFrame" in str(e) and flf_attempted:
-                    # SDK doesn't support lastFrame, fall back to I2V mode
-                    self.logger.warning(f"FLF mode not supported by SDK, falling back to I2V: {e}")
-                    api_kwargs.pop("lastFrame", None)
-                    operation = self.retry_handler.retry_with_backoff(
-                        self.genai_client.models.generate_videos,
-                        **api_kwargs
-                    )
-                else:
-                    raise
-            
+            set_generation_details(model=self.model_name, prompt=prompt,
+                parameters={k: v for k, v in config_args.items() if k not in {"last_frame", "output_gcs_uri"}},
+                billing=BillingObservation(estimated_usd=estimated_cost))
+            # Paid submissions must be recorded individually by the orchestrator.
+            operation = self.genai_client.models.generate_videos(**request_args)
+            set_generation_details(provider_request_id=getattr(operation, "name", None))
+
             # Poll the operation until completion
             start_time = time.time()
             progress_monitor.update(10, "Video generation started, waiting for completion...")
@@ -392,8 +330,15 @@ class Veo3Generator(VideoGeneratorInterface):
             self.logger.info(f"Video generation completed in {format_duration(elapsed)}")
             progress_monitor.update(100, "Video generation complete")
             
-            # Extract the video URI from the operation result
-            if operation.response and hasattr(operation.result, 'generated_videos') and operation.result.generated_videos:
+            response = operation.response
+            if self.api_key and response and response.generated_videos:
+                video = response.generated_videos[0].video
+                self.genai_client.files.download(file=video)
+                video.save(output_path)
+                return output_path
+
+            # Extract the Vertex output URI from the operation result.
+            if response and hasattr(operation.result, 'generated_videos') and operation.result.generated_videos:
                 video_uri = operation.result.generated_videos[0].video.uri
                 if video_uri:
                     self.logger.info(f"Video generated successfully: {video_uri}")
@@ -407,30 +352,6 @@ class Veo3Generator(VideoGeneratorInterface):
             if isinstance(e, VideoGenerationError):
                 raise
             raise VideoGenerationError(f"Unexpected error during video generation: {e}")
-    
-    def _prepare_image(self, image_path: str, use_local_file: bool = False) -> 'GenAIImage':
-        """
-        Prepare an image for the Veo API
-        
-        Args:
-            image_path: Path to the local image file
-            use_local_file: If True, load directly from file; otherwise upload to GCS
-            
-        Returns:
-            GenAIImage object ready for API call
-        """
-        # Get the MIME type of the image
-        mime_type, _ = mimetypes.guess_type(image_path)
-        if not mime_type:
-            mime_type = "image/jpeg"  # Default to JPEG if can't determine
-        
-        if use_local_file:
-            # For local testing with direct file access
-            return GenAIImage.from_file(image_path, mime_type=mime_type)
-        else:
-            # Upload to GCS and use GCS URI
-            gcs_uri = self._upload_to_gcs(image_path)
-            return GenAIImage(gcs_uri=gcs_uri, mime_type=mime_type)
     
     def _create_output_gcs_uri(self) -> str:
         """Create a unique GCS URI for the output video"""
@@ -466,6 +387,8 @@ class Veo3Generator(VideoGeneratorInterface):
             max_size_mb=10.0
         )
         
+        replace_generation_reference(image_path, prepared_image)
+
         # Create a unique blob name
         timestamp = int(time.time())
         filename = os.path.basename(prepared_image)
@@ -536,7 +459,7 @@ class Veo3Generator(VideoGeneratorInterface):
         """Check if Veo 3 API is available"""
         try:
             # Check if credentials are valid and we have basic requirements
-            if not self.project_id:
+            if not self.api_key and not self.project_id:
                 return False
             
             # Simple connectivity check - just verify we can access the client

@@ -20,8 +20,8 @@ prompt: >
 # If set to "auto", the system will automatically select the best available backend
 default_backend: veo3
 
-# Generation mode settings (for local Wan2.1 backend)
-generation_mode: "chaining"  # Options: "keyframe" or "chaining"
+# Generation mode settings
+generation_mode: "keyframe"  # Required for Veo first/last-frame generation
 
 # ============================================================================
 # LOCAL BACKEND CONFIGURATION (Wan2.1)
@@ -77,9 +77,9 @@ runway_ml:
 # Remote API configuration - Google Veo 3
 google_veo:
   project_id: "YOUR_GCP_PROJECT_ID"      # Required for Veo 3
-  credentials_path: "credentials.json"   # Path to service account credentials
+  credentials_path: "credentials/credentials.json"  # Path to service account credentials
   region: "us-central1"
-  veo_model: "veo-3.0-generate-preview"  # Veo 3
+  veo_model: "veo-3.1-generate-001"      # Or veo-3.1-fast-generate-001
 #  output_bucket: "your-output-bucket"    # Optional: GCS bucket for outputs
 
 # Remote API configuration - Minimax
@@ -91,15 +91,30 @@ minimax:
 
 # Remote API configuration - fal.ai
 fal:
-  api_key: "YOUR_FAL_API_KEY"                 # Required unless FAL_API_KEY env var is set
-  model: "fal-ai/minimax/hailuo-02/standard/image-to-video"  # Any fal model endpoint ID
-  base_url: "https://fal.run"                 # fal synchronous endpoint base URL
-  max_duration: 10                             # Per-request duration cap enforced by this pipeline
-  default_input: {}                            # Optional model-specific default input fields
+  # Set FAL_KEY or FAL_API_KEY in the process environment.
+  model: "minimax/h3-max/image-to-video"
+  base_url: "https://queue.fal.run"
+  queue_start_timeout: 300                     # Maximum queue wait before fal starts processing
+  default_input:                               # Only documented fields for the selected profile are accepted
+    resolution: "768P"
+    prompt_expansion_mode: "disabled"            # Keep the reviewed prompt unchanged
+    enable_safety_checker: true
+# Supported profiles:
+# - minimax/h3-max/image-to-video (5-15 integer seconds; optional ending frame)
+# - bytedance/seedance-2.0/image-to-video
+# - bytedance/seedance-2.0/fast/image-to-video
+# - fal-ai/veo3.1/image-to-video
+# - fal-ai/veo3.1/first-last-frame-to-video
+# - fal-ai/veo3.1/fast/image-to-video
+# - fal-ai/veo3.1/fast/first-last-frame-to-video
+# - fal-ai/minimax/hailuo-02/standard/image-to-video
+# - fal-ai/minimax/video-01/image-to-video
 
 # Remote API settings (applies to all API backends)
 remote_api_settings:
   max_retries: 3            # Maximum retry attempts
+  polling_interval: 5       # Queue status polling interval in seconds
+  http_timeout: 30          # Timeout for each queue API read
   timeout: 600              # Maximum wait time in seconds
   # fallback_backend: "wan2.1" # Fallback if primary API fails (comment out to disable fallback)
 
@@ -119,7 +134,7 @@ image_generation_model: "gemini-2.5-flash-image-preview"
 # - For models supporting I2I (Gemini, Stability AI): reference images will be automatically loaded
 # - For models not supporting I2I (OpenAI): falls back to T2I generation
 # - If reference_images_dir is empty and auto_generate_initial is true, initial reference is generated
-# - Single keyframe mode is required for Veo3 (no FLF support)
+# - This remote-keyframe path sends both first and last frames to Veo 3.1
 # Reference images directory - place all reference images here
 # Images will be automatically loaded and used for character/setting consistency
 reference_images_dir: "input"  # Directory containing reference images
@@ -134,8 +149,8 @@ image_size: "1024x1024"  # 1:1 aspect ratio - compatible with veo3 input require
 # Auto-generate initial reference image if not provided
 auto_generate_initial: true  # Generate initial image if reference_images_dir is empty
 
-# Single keyframe mode for Veo3 (no FLF support)
-single_keyframe_mode: true   # Generate one keyframe per segment for I2V
+# Remote keyframe mode for Veo3
+single_keyframe_mode: true   # Send each segment's first and last keyframes to Veo
 
 # Position of keyframe for I2V generation: first/middle/last
 keyframe_position: "first"  # Position of keyframe: first/middle/last
@@ -195,6 +210,7 @@ veo_resolution: "720p"
 # Video generation parameters (applies to all backends)
 # Note: For Veo 3.1 FLF mode, duration is automatically set to 8 seconds
 segment_duration_seconds: 8.0 # Desired duration for each video segment in seconds
+# duration_seconds: 15        # Optional requested final runtime (max 14440s); Veo/fal use profiled clip lengths and trim only if needed
 frame_num: 81         # Number of frames (for ~5 seconds at 16fps)
 sample_steps: 40      # Sampling steps
 sample_shift: 5.0     # Sampling shift factor

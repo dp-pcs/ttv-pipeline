@@ -205,7 +205,7 @@ class TestJobCreation:
     
     def test_create_job_prompt_too_long(self, client):
         """Test job creation with prompt that's too long"""
-        long_prompt = "A" * 2001  # Exceeds 2000 character limit
+        long_prompt = "A" * 10001  # Exceeds 10000 character limit
         response = client.post("/v1/jobs", json={"prompt": long_prompt})
         
         assert response.status_code == 422  # Validation error

@@ -19,7 +19,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus as RQJobStatus
 
 from .models import JobData, JobStatus, JobCreateRequest
-from .config import RedisConfig
+from .config import RedisConfig, redact_config_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,8 @@ class JobQueue:
         self, 
         request: JobCreateRequest, 
         effective_config: Dict[str, Any],
-        job_timeout: int = 3600
+        job_timeout: int = 3600,
+        job_id: str | None = None
     ) -> JobData:
         """
         Enqueue a new video generation job
@@ -131,7 +132,7 @@ class JobQueue:
         Raises:
             Exception: If job enqueueing fails
         """
-        job_id = str(uuid.uuid4())
+        job_id = job_id or str(uuid.uuid4())
         created_at = datetime.now(timezone.utc)
         
         # Create job data
@@ -139,9 +140,13 @@ class JobQueue:
             id=job_id,
             status=JobStatus.QUEUED,
             created_at=created_at,
-            prompt=request.prompt,
+            prompt=(
+                request.prompt
+                or effective_config.get("prompt")
+                or "Resumed from reviewed prompt plan"
+            ),
             title=effective_config.get('title'),
-            config=effective_config
+            config=redact_config_secrets(effective_config)
         )
         
         try:
