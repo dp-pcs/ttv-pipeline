@@ -46,7 +46,6 @@ export interface ApiStatus {
 export interface AppSettings {
   openai_api_key?: string;
   google_project_id?: string;
-  backend_selection: 'google_veo' | 'runway' | 'minimax';
   budget_cap: number;
   api_base_url: string;
 }

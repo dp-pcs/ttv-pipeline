@@ -1,66 +1,80 @@
 
 'use client';
 
-import { useState } from 'react';
-import { 
-  Dialog, 
-  DialogContent, 
-  DialogDescription, 
-  DialogHeader, 
-  DialogTitle 
+import { useEffect, useState } from 'react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
-import { JobDetails } from '@/lib/types';
-import { formatTimestamp, formatDuration, formatCurrency, getJobStatusColor } from '@/lib/utils';
+import { formatTimestamp, getJobStatusColor } from '@/lib/utils';
+import { GenerationResult, getJobResult, gcsUriToStoragePath } from '@/lib/api-v2';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import type { DisplayJob } from './dashboard';
 import {
-  Clock,
   DollarSign,
   Film,
   Download,
   Copy,
   Eye,
   Settings,
-  Terminal,
+  AlertTriangle,
   Loader2,
 } from 'lucide-react';
 
 interface JobDetailsModalProps {
-  job: JobDetails;
+  job: DisplayJob;
   open: boolean;
   onClose: () => void;
 }
 
 export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
   const [isDownloading, setIsDownloading] = useState(false);
+  const [result, setResult] = useState<GenerationResult | null>(null);
   const { toast } = useToast();
+
+  useEffect(() => {
+    setResult(null);
+    if (job.result_id) {
+      getJobResult(job.id).then(setResult).catch((error) => {
+        console.error('Failed to fetch job result:', error);
+      });
+    }
+  }, [job.id, job.result_id]);
 
   const handleDownload = async () => {
     setIsDownloading(true);
-    
+
     try {
-      const response = await api.downloadJobVideo(job.id);
-      
+      const current = result ?? (await getJobResult(job.id));
+      const asset = current.preview_assets[0] ?? current.scenes.flatMap((s) => s.clips)[0]?.asset;
+      const path = asset ? gcsUriToStoragePath(asset.uri) : null;
+      if (!path) throw new Error('No downloadable asset found for this job yet');
+      const response = await api.downloadFromStorage(path);
+
       if (response instanceof Response) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `visionweave-${job.title || job.id.slice(0, 8)}.mp4`;
+        a.download = `visionweave-${job.title || job.id.slice(0, 8)}${current.result_kind === 'keyframes' ? '.zip' : '.mp4'}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        
+
         toast({
           variant: "default",
           title: "Download Started",
-          description: "Your video is being downloaded",
+          description: "Your file is being downloaded",
         });
       }
     } catch (error) {
@@ -68,7 +82,7 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
       toast({
         variant: "destructive",
         title: "Download Failed",
-        description: "Unable to download video file",
+        description: error instanceof Error ? error.message : "Unable to download the result",
       });
     } finally {
       setIsDownloading(false);
@@ -88,9 +102,10 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
 
   const getStatusVariant = (status: string) => {
     switch (status) {
-      case 'completed': return 'success';
-      case 'processing': return 'processing';
-      case 'pending': return 'pending';
+      case 'finished': return 'success';
+      case 'started':
+      case 'progress': return 'processing';
+      case 'queued': return 'pending';
       case 'failed': return 'destructive';
       default: return 'secondary';
     }
@@ -110,12 +125,12 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
                 Created {formatTimestamp(job.created_at)}
               </DialogDescription>
             </div>
-            
+
             <div className="flex items-center gap-2">
               <Badge variant={getStatusVariant(job.status)}>
                 {job.status}
               </Badge>
-              {job.status === 'completed' && (
+              {job.status === 'finished' && (
                 <Button
                   onClick={handleDownload}
                   disabled={isDownloading}
@@ -145,19 +160,19 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
               <Eye className="w-4 h-4" />
               Overview
             </TabsTrigger>
-            <TabsTrigger value="logs" className="flex items-center gap-2">
-              <Terminal className="w-4 h-4" />
-              Logs
+            <TabsTrigger value="warnings" className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              Warnings
             </TabsTrigger>
             <TabsTrigger value="config" className="flex items-center gap-2">
               <Settings className="w-4 h-4" />
-              Config
+              Raw Data
             </TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="space-y-6">
             {/* Progress */}
-            {job.status === 'processing' && (
+            {(job.status === 'progress' || job.status === 'started') && (
               <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Progress</CardTitle>
@@ -166,7 +181,7 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
                   <div className="space-y-3">
                     <Progress value={job.progress || 0} className="h-3" />
                     <div className="flex justify-between text-sm">
-                      <span>Processing video segments...</span>
+                      <span>{job.current_scene_id ? `Scene ${job.current_scene_id}` : 'Processing...'}</span>
                       <span>{Math.round(job.progress || 0)}%</span>
                     </div>
                   </div>
@@ -191,31 +206,21 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
                       <div className={getJobStatusColor(job.status)}>{job.status}</div>
                     </div>
                     <div>
-                      <div className="font-medium text-muted-foreground">Created</div>
-                      <div>{formatTimestamp(job.created_at)}</div>
+                      <div className="font-medium text-muted-foreground">Started</div>
+                      <div>{job.started_at ? formatTimestamp(job.started_at) : '—'}</div>
                     </div>
                     <div>
-                      <div className="font-medium text-muted-foreground">Updated</div>
-                      <div>{formatTimestamp(job.updated_at)}</div>
+                      <div className="font-medium text-muted-foreground">Finished</div>
+                      <div>{job.finished_at ? formatTimestamp(job.finished_at) : '—'}</div>
                     </div>
                   </div>
 
-                  {job.duration && (
+                  {result && (
                     <div>
-                      <div className="font-medium text-muted-foreground text-sm">Duration</div>
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4 text-muted-foreground" />
-                        <span>{formatDuration(job.duration)}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {job.estimated_cost && (
-                    <div>
-                      <div className="font-medium text-muted-foreground text-sm">Estimated Cost</div>
+                      <div className="font-medium text-muted-foreground text-sm">Result</div>
                       <div className="flex items-center gap-2">
                         <DollarSign className="w-4 h-4 text-muted-foreground" />
-                        <span>{formatCurrency(job.estimated_cost)}</span>
+                        <span>{result.terminal_status} ({result.result_kind})</span>
                       </div>
                     </div>
                   )}
@@ -250,38 +255,33 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
                 </CardContent>
               </Card>
             </div>
-
-            {/* Error Message */}
-            {job.status === 'failed' && job.error_message && (
-              <Card className="border-red-500/20 bg-red-500/5">
-                <CardHeader>
-                  <CardTitle className="text-lg text-red-400">Error Details</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm font-mono bg-background/50 rounded-md p-3">
-                    {job.error_message}
-                  </p>
-                </CardContent>
-              </Card>
-            )}
           </TabsContent>
 
-          <TabsContent value="logs" className="space-y-4">
+          <TabsContent value="warnings" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Job Logs</CardTitle>
+                <CardTitle className="text-lg">Job Warnings</CardTitle>
               </CardHeader>
               <CardContent>
-                {job.logs && job.logs.length > 0 ? (
-                  <div className="bg-black/50 rounded-md p-4 font-mono text-sm max-h-96 overflow-y-auto">
-                    {job.logs.map((log, index) => (
-                      <div key={index} className="text-green-400 mb-1">
-                        {log}
+                {job.warnings && job.warnings.length > 0 ? (
+                  <div className="space-y-2">
+                    {job.warnings.map((warning, index) => (
+                      <div key={index} className="text-sm bg-yellow-500/10 border border-yellow-500/30 rounded-md p-3 text-yellow-200">
+                        {warning}
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <p className="text-muted-foreground">No logs available</p>
+                  <p className="text-muted-foreground">No warnings</p>
+                )}
+                {result?.scenes.some((s) => s.warnings.length > 0) && (
+                  <div className="mt-4 space-y-2">
+                    {result.scenes.flatMap((s) => s.warnings.map((w, i) => (
+                      <div key={`${s.scene_id}-${i}`} className="text-sm bg-red-500/10 border border-red-500/30 rounded-md p-3 text-red-200">
+                        {s.scene_id}: {w}
+                      </div>
+                    )))}
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -290,20 +290,30 @@ export function JobDetailsModal({ job, open, onClose }: JobDetailsModalProps) {
           <TabsContent value="config" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Job Configuration</CardTitle>
+                <CardTitle className="text-lg">Raw Job Document</CardTitle>
               </CardHeader>
               <CardContent>
-                {job.config && Object.keys(job.config).length > 0 ? (
-                  <div className="bg-muted/50 rounded-md p-4">
-                    <pre className="text-sm overflow-x-auto">
-                      {JSON.stringify(job.config, null, 2)}
-                    </pre>
-                  </div>
-                ) : (
-                  <p className="text-muted-foreground">No configuration data available</p>
-                )}
+                <div className="bg-muted/50 rounded-md p-4">
+                  <pre className="text-sm overflow-x-auto">
+                    {JSON.stringify(job, null, 2)}
+                  </pre>
+                </div>
               </CardContent>
             </Card>
+            {result && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Generation Result</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="bg-muted/50 rounded-md p-4">
+                    <pre className="text-sm overflow-x-auto">
+                      {JSON.stringify(result, null, 2)}
+                    </pre>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
         </Tabs>
       </DialogContent>

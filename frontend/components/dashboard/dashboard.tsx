@@ -1,50 +1,68 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { PromptInput } from './prompt-input';
 import { JobQueue } from './job-queue';
 import { PipelineOverview } from './pipeline-overview';
 import { ApiStatusCard } from './api-status-card';
-import { JobStatus } from '@/lib/types';
-import { api } from '@/lib/api';
+import { JobDocument, getJob } from '@/lib/api-v2';
+import { getTrackedJobs, removeTrackedJob } from '@/lib/job-tracker';
 import { useToast } from '@/hooks/use-toast';
 
+export type DisplayJob = JobDocument & { title?: string; prompt?: string };
+
 export function Dashboard() {
-  const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const [jobs, setJobs] = useState<DisplayJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
 
-  const fetchJobs = async () => {
+  const fetchJobs = useCallback(async () => {
+    const tracked = getTrackedJobs();
+    if (tracked.length === 0) {
+      setJobs([]);
+      setIsLoading(false);
+      return;
+    }
     try {
-      const jobsData = await api.getJobs();
-      setJobs(jobsData || []);
+      const results = await Promise.all(
+        tracked.map(async (meta): Promise<DisplayJob | null> => {
+          try {
+            const job = await getJob(meta.id);
+            return { ...job, title: meta.title, prompt: meta.prompt };
+          } catch (error) {
+            console.error(`Failed to fetch job ${meta.id}:`, error);
+            return null;
+          }
+        })
+      );
+      setJobs(results.filter((job): job is DisplayJob => job !== null));
     } catch (error) {
       console.error('Failed to fetch jobs:', error);
       toast({
-        variant: "destructive",
-        title: "Failed to load jobs",
-        description: "Unable to connect to the VisionWeave API",
+        variant: 'destructive',
+        title: 'Failed to load jobs',
+        description: 'Unable to connect to the VisionWeave API',
       });
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
     fetchJobs();
-    
+
     // Poll for job updates every 5 seconds
     const interval = setInterval(fetchJobs, 5000);
-    
+
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchJobs]);
 
   const handleJobCreated = (jobId: string) => {
-    // Refresh jobs list after new job creation
+    // addTrackedJob() already happened in PromptInput; just refresh the list.
     fetchJobs();
-    
+
     toast({
       variant: "default",
       title: "Job Created",
@@ -53,12 +71,13 @@ export function Dashboard() {
   };
 
   const handleJobDeleted = (jobId: string) => {
+    removeTrackedJob(jobId);
     setJobs(prev => prev.filter(job => job.id !== jobId));
-    
+
     toast({
-      variant: "default", 
-      title: "Job Deleted",
-      description: "Job has been removed from the queue",
+      variant: "default",
+      title: "Job Removed",
+      description: "Job has been removed from your tracked list",
     });
   };
 
@@ -72,7 +91,7 @@ export function Dashboard() {
             <span className="metallic-gradient">Videos</span>
           </h1>
           <p className="text-xl text-muted-foreground max-w-3xl mx-auto mb-8">
-            Generate stunning videos from text prompts using AI-powered keyframe generation 
+            Generate stunning videos from text prompts using AI-powered keyframe generation
             and seamless video stitching technology.
           </p>
         </div>
@@ -81,10 +100,10 @@ export function Dashboard() {
       <div className="max-w-screen-xl mx-auto px-4 pb-12 space-y-8">
         {/* API Status */}
         <ApiStatusCard />
-        
+
         {/* Pipeline Overview */}
         <PipelineOverview />
-        
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           {/* Prompt Input Section */}
           <div className="space-y-6">
@@ -120,8 +139,8 @@ export function Dashboard() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <JobQueue 
-                  jobs={jobs} 
+                <JobQueue
+                  jobs={jobs}
                   onJobDeleted={handleJobDeleted}
                   isLoading={isLoading}
                 />

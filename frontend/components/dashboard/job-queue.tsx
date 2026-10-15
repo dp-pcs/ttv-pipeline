@@ -6,14 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Card, CardContent } from '@/components/ui/card';
-import { JobStatus, JobDetails } from '@/lib/types';
-import { formatTimestamp, getJobStatusColor, cn } from '@/lib/utils';
+import { formatTimestamp } from '@/lib/utils';
+import { getJobResult, cancelJob, gcsUriToStoragePath } from '@/lib/api-v2';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { JobDetailsModal } from './job-details-modal';
+import type { DisplayJob } from './dashboard';
 import {
   Play,
-  Pause,
   Download,
   Trash2,
   Eye,
@@ -25,55 +25,52 @@ import {
 } from 'lucide-react';
 
 interface JobQueueProps {
-  jobs: JobStatus[];
+  jobs: DisplayJob[];
   onJobDeleted: (jobId: string) => void;
   isLoading: boolean;
 }
 
+// v2's job status enum (api/models.py JobStatus): queued, started, progress,
+// finished, failed, canceled — distinct from the frontend's old (and never
+// actually matching) pending/processing/completed/failed/cancelled guesses.
+const ACTIVE_STATUSES = new Set(['queued', 'started', 'progress']);
+
 export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
-  const [selectedJob, setSelectedJob] = useState<JobDetails | null>(null);
+  const [selectedJob, setSelectedJob] = useState<DisplayJob | null>(null);
   const [loadingActions, setLoadingActions] = useState<Record<string, boolean>>({});
   const { toast } = useToast();
 
-  const handleViewDetails = async (jobId: string) => {
-    setLoadingActions(prev => ({ ...prev, [jobId]: true }));
-    
-    try {
-      const details = await api.getJobDetails(jobId);
-      setSelectedJob(details);
-    } catch (error) {
-      console.error('Failed to fetch job details:', error);
-      toast({
-        variant: "destructive",
-        title: "Failed to load job details",
-        description: "Unable to fetch job information",
-      });
-    } finally {
-      setLoadingActions(prev => ({ ...prev, [jobId]: false }));
-    }
+  const handleViewDetails = (job: DisplayJob) => {
+    setSelectedJob(job);
   };
 
   const handleDownload = async (jobId: string) => {
     setLoadingActions(prev => ({ ...prev, [`download-${jobId}`]: true }));
-    
+
     try {
-      const response = await api.downloadJobVideo(jobId);
-      
+      const result = await getJobResult(jobId);
+      const asset = result.preview_assets[0] ?? result.scenes.flatMap((s) => s.clips)[0]?.asset;
+      const path = asset ? gcsUriToStoragePath(asset.uri) : null;
+      if (!path) {
+        throw new Error('No downloadable asset found for this job yet');
+      }
+      const response = await api.downloadFromStorage(path);
+
       if (response instanceof Response) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `visionweave-${jobId.slice(0, 8)}.mp4`;
+        a.download = `visionweave-${jobId.slice(0, 8)}${result.result_kind === 'keyframes' ? '.zip' : '.mp4'}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        
+
         toast({
           variant: "default",
           title: "Download Started",
-          description: "Your video is being downloaded",
+          description: "Your file is being downloaded",
         });
       }
     } catch (error) {
@@ -81,46 +78,52 @@ export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
       toast({
         variant: "destructive",
         title: "Download Failed",
-        description: "Unable to download video file",
+        description: error instanceof Error ? error.message : "Unable to download the result",
       });
     } finally {
       setLoadingActions(prev => ({ ...prev, [`download-${jobId}`]: false }));
     }
   };
 
-  const handleDelete = async (jobId: string) => {
-    if (!confirm('Are you sure you want to delete this job? This action cannot be undone.')) {
+  const handleRemove = async (job: DisplayJob) => {
+    const isActive = ACTIVE_STATUSES.has(job.status);
+    if (!confirm(isActive
+      ? 'This job is still running. Cancel it and stop tracking it?'
+      : 'Stop tracking this job? (It stays in the backend\'s records; this only removes it from your list.)')) {
       return;
     }
 
-    setLoadingActions(prev => ({ ...prev, [`delete-${jobId}`]: true }));
-    
+    setLoadingActions(prev => ({ ...prev, [`delete-${job.id}`]: true }));
+
     try {
-      await api.deleteJob(jobId);
-      onJobDeleted(jobId);
+      if (isActive) {
+        await cancelJob(job.id);
+      }
+      onJobDeleted(job.id);
     } catch (error) {
-      console.error('Delete failed:', error);
+      console.error('Remove failed:', error);
       toast({
         variant: "destructive",
-        title: "Delete Failed",
-        description: "Unable to delete job",
+        title: "Failed to cancel job",
+        description: "Unable to cancel the job; it was not removed from your list",
       });
     } finally {
-      setLoadingActions(prev => ({ ...prev, [`delete-${jobId}`]: false }));
+      setLoadingActions(prev => ({ ...prev, [`delete-${job.id}`]: false }));
     }
   };
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case 'completed':
+      case 'finished':
         return <CheckCircle className="w-4 h-4 text-green-400" />;
-      case 'processing':
+      case 'started':
+      case 'progress':
         return <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />;
-      case 'pending':
+      case 'queued':
         return <Clock className="w-4 h-4 text-yellow-400" />;
       case 'failed':
         return <XCircle className="w-4 h-4 text-red-400" />;
-      case 'cancelled':
+      case 'canceled':
         return <AlertCircle className="w-4 h-4 text-gray-400" />;
       default:
         return <Clock className="w-4 h-4 text-gray-400" />;
@@ -129,9 +132,10 @@ export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
 
   const getStatusVariant = (status: string) => {
     switch (status) {
-      case 'completed': return 'success';
-      case 'processing': return 'processing';
-      case 'pending': return 'pending';
+      case 'finished': return 'success';
+      case 'started':
+      case 'progress': return 'processing';
+      case 'queued': return 'pending';
       case 'failed': return 'destructive';
       default: return 'secondary';
     }
@@ -184,7 +188,7 @@ export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
                 <div className="flex-shrink-0 mt-1">
                   {getStatusIcon(job.status)}
                 </div>
-                
+
                 <div className="flex-1 min-w-0 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
@@ -197,42 +201,41 @@ export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
                         </p>
                       )}
                     </div>
-                    
+
                     <Badge variant={getStatusVariant(job.status)}>
                       {job.status}
                     </Badge>
                   </div>
 
-                  {job.status === 'processing' && (
+                  {(job.status === 'progress' || job.status === 'started') && (
                     <div className="space-y-1">
                       <Progress value={job.progress || 0} className="h-2" />
                       <div className="flex justify-between text-xs text-muted-foreground">
-                        <span>Processing...</span>
+                        <span>{job.current_scene_id ? `Scene ${job.current_scene_id}` : 'Processing...'}</span>
                         <span>{Math.round(job.progress || 0)}%</span>
                       </div>
                     </div>
+                  )}
+
+                  {job.warnings.length > 0 && (
+                    <p className="text-xs text-yellow-400">⚠ {job.warnings[0]}{job.warnings.length > 1 ? ` (+${job.warnings.length - 1} more)` : ''}</p>
                   )}
 
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground">
                       {formatTimestamp(job.created_at)}
                     </span>
-                    
+
                     <div className="flex items-center gap-1">
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => handleViewDetails(job.id)}
-                        disabled={loadingActions[job.id]}
+                        onClick={() => handleViewDetails(job)}
                       >
-                        {loadingActions[job.id] ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
+                        <Eye className="w-4 h-4" />
                       </Button>
 
-                      {job.status === 'completed' && (
+                      {job.status === 'finished' && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -250,7 +253,7 @@ export function JobQueue({ jobs, onJobDeleted, isLoading }: JobQueueProps) {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => handleDelete(job.id)}
+                        onClick={() => handleRemove(job)}
                         disabled={loadingActions[`delete-${job.id}`]}
                         className="text-red-400 hover:text-red-300"
                       >

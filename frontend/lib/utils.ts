@@ -28,18 +28,19 @@ export function formatTimestamp(timestamp: string): string {
   }
 }
 
+// Status values match api/models.py's JobStatus enum (v2 job documents):
+// queued, started, progress, finished, failed, canceled.
 export function getJobStatusColor(status: string): string {
   switch (status) {
-    case 'completed':
+    case 'finished':
       return 'text-green-600 bg-green-100'
-    case 'processing':
+    case 'started':
     case 'progress':
       return 'text-blue-600 bg-blue-100'
     case 'failed':
       return 'text-red-600 bg-red-100'
-    case 'cancelled':
+    case 'canceled':
       return 'text-gray-600 bg-gray-100'
-    case 'pending':
     case 'queued':
       return 'text-yellow-600 bg-yellow-100'
     default:

@@ -8,7 +8,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AppSettings, ApiStatus } from '@/lib/types';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -28,7 +27,6 @@ import {
 const DEFAULT_SETTINGS: AppSettings = {
   openai_api_key: '',
   google_project_id: '',
-  backend_selection: 'minimax',
   budget_cap: 10.0,
   api_base_url: 'http://localhost:8000',
 };
@@ -276,31 +274,6 @@ export function Settings() {
           <CardContent className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <Label htmlFor="backend_selection">Video Generation Backend</Label>
-                <Select
-                  value={settings.backend_selection}
-                  onValueChange={(value: 'google_veo' | 'runway' | 'minimax') => 
-                    handleSettingChange('backend_selection', value)
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select backend" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="minimax">
-                      MiniMax (Recommended)
-                    </SelectItem>
-                    <SelectItem value="runway">
-                      Runway ML
-                    </SelectItem>
-                    <SelectItem value="google_veo">
-                      Google Veo
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
                 <Label htmlFor="budget_cap" className="flex items-center gap-2">
                   <DollarSign className="w-4 h-4" />
                   Budget Cap per Video
@@ -320,11 +293,11 @@ export function Settings() {
 
             <div className="bg-muted/50 rounded-lg p-4 space-y-2">
               <h4 className="font-medium text-sm">Backend Information</h4>
-              <div className="text-xs text-muted-foreground space-y-1">
-                <p><strong>MiniMax:</strong> Fast processing, good quality, competitive pricing</p>
-                <p><strong>Runway ML:</strong> High quality, slower processing, higher cost</p>
-                <p><strong>Google Veo:</strong> Experimental, variable quality and speed</p>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                The video generation backend is now chosen per-video, populated live from
+                the API's available providers — see the backend dropdown above the prompt
+                box on the main page.
+              </p>
             </div>
           </CardContent>
         </Card>
