@@ -124,11 +124,11 @@ remote_api_settings:
 
 # Image generation model - supports both T2I and I2I based on reference images
 # Options:
-#  - "gemini-2.5-flash-image-preview" (Google Gemini 2.5 Flash Image - I2I support)
+#  - "gemini-3.1-flash-image" (Google Gemini 3.1 Flash Image "Nano Banana 2" - I2I support)
 #  - "stabilityai/sd3:stable" (Stability AI SD3 model - I2I support)
 #  - "openai/gpt-image-1" (OpenAI GPT Image model - T2I only)
 #  - "stable-diffusion" (Stability AI - I2I support)
-image_generation_model: "gemini-2.5-flash-image-preview"
+image_generation_model: "gemini-3.1-flash-image"
 
 # Image generation configuration - supports both T2I and I2I based on reference images
 # - For models supporting I2I (Gemini, Stability AI): reference images will be automatically loaded

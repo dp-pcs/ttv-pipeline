@@ -90,7 +90,7 @@ google_veo:
 
 # Gemini Configuration (choose one method)
 # Method 1: Using service account (recommended)
-image_generation_model: "gemini-2.5-flash-image-preview"
+image_generation_model: "gemini-3.1-flash-image"
 
 # Method 2: Using API key (simpler)
 gemini_api_key: "your_gemini_api_key_here"

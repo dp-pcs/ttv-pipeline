@@ -429,7 +429,7 @@ def generate_keyframe_with_gemini(
     gemini_api_key: str,
     input_image_path: Optional[str] = None,
     reference_images_dir: Optional[str] = None,
-    model_name: str = "gemini-2.5-flash-image",
+    model_name: str = "gemini-3.1-flash-image",
     max_retries: int = 2,
     aspect_ratio: str | None = None,
     image_size: str | None = None,
@@ -757,7 +757,7 @@ def _generate_keyframe(prompt, output_path, model_name, imageRouter_api_key=None
     
     # Set default model if none provided
     if model_name is None:
-        model_name = "gemini-2.5-flash-image"
+        model_name = "gemini-3.1-flash-image"
     
     logging.info(f"Generating image with model: {model_name}")
     
