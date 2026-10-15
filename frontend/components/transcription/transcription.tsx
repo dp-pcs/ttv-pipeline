@@ -1,92 +1,64 @@
-
 'use client';
 
 import { useState, useCallback } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Textarea } from '@/components/ui/textarea';
-import { Progress } from '@/components/ui/progress';
-import { Separator } from '@/components/ui/separator';
 import { TranscriptionResult } from '@/lib/types';
 import { formatDuration, formatFileSize } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
-import {
-  Mic,
-  Upload,
-  Download,
-  Copy,
-  FileAudio,
-  FileVideo,
-  Loader2,
-  CheckCircle,
-  AlertCircle,
-  Volume2,
-  Clock,
-  Type,
-  X
-} from 'lucide-react';
 
 const SUPPORTED_FORMATS = [
   'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/m4a', 'audio/flac',
-  'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo'
+  'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo',
 ];
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
+type Step = 'upload' | 'processing' | 'completed' | 'error';
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
+interface SrtCue { n: number; t: string; text: string; }
 
-type TranscriptionStep = 'upload' | 'processing' | 'completed' | 'error';
+function parseSrt(srt: string): SrtCue[] {
+  const cues: SrtCue[] = [];
+  const blocks = srt.trim().split(/\n\n+/);
+  for (const block of blocks) {
+    const lines = block.trim().split('\n');
+    if (lines.length < 2) continue;
+    const n = parseInt(lines[0], 10);
+    const t = lines[1] ?? '';
+    const text = lines.slice(2).join(' ');
+    if (!isNaN(n) && t.includes('-->')) cues.push({ n, t, text });
+  }
+  return cues;
+}
+
+const mono: React.CSSProperties = { fontFamily: 'var(--font-mono, JetBrains Mono, monospace)' };
 
 export function Transcription() {
-  const [step, setStep] = useState<TranscriptionStep>('upload');
+  const [step, setStep] = useState<Step>('upload');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<TranscriptionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [outputFormat, setOutputFormat] = useState<'srt' | 'text'>('srt');
   const { toast } = useToast();
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-  }, []);
-
+  const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragOver(false); }, []);
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    
     const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      handleFileSelection(files[0]);
-    }
+    if (files.length > 0) handleFileSelection(files[0]);
   }, []);
 
   const handleFileSelection = (file: File) => {
     if (!SUPPORTED_FORMATS.includes(file.type)) {
-      toast({
-        variant: "destructive",
-        title: "Unsupported File Format",
-        description: "Please select an audio or video file (MP3, WAV, MP4, etc.)",
-      });
+      toast({ variant: 'destructive', title: 'Unsupported File Format', description: 'Please select an audio or video file (MP3, WAV, MP4, etc.)' });
       return;
     }
-
     if (file.size > MAX_FILE_SIZE) {
-      toast({
-        variant: "destructive",
-        title: "File Too Large",
-        description: `File size must be less than ${formatFileSize(MAX_FILE_SIZE)}`,
-      });
+      toast({ variant: 'destructive', title: 'File Too Large', description: `File size must be less than ${formatFileSize(MAX_FILE_SIZE)}` });
       return;
     }
-
     setSelectedFile(file);
     setStep('upload');
     setError(null);
@@ -94,77 +66,38 @@ export function Transcription() {
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      handleFileSelection(file);
-    }
+    if (file) handleFileSelection(file);
   };
 
   const startTranscription = async () => {
     if (!selectedFile) return;
-
     setIsProcessing(true);
     setStep('processing');
     setProgress(0);
     setError(null);
-
     try {
-      // Simulate progress updates
-      const progressInterval = setInterval(() => {
-        setProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return 90;
-          }
-          return prev + 10;
-        });
-      }, 500);
-
-      const transcriptionResult = await api.uploadForTranscription(selectedFile);
-      
-      clearInterval(progressInterval);
+      const interval = setInterval(() => setProgress(p => p >= 90 ? (clearInterval(interval), 90) : p + 10), 500);
+      const res = await api.uploadForTranscription(selectedFile);
+      clearInterval(interval);
       setProgress(100);
-      
-      setResult(transcriptionResult);
+      setResult(res);
       setStep('completed');
-      
-      toast({
-        variant: "default",
-        title: "Transcription Complete",
-        description: "Your audio has been successfully transcribed",
-      });
-    } catch (error) {
-      console.error('Transcription failed:', error);
-      setError(error instanceof Error ? error.message : 'Transcription failed');
+      toast({ variant: 'default', title: 'Transcription Complete', description: 'Your audio has been successfully transcribed' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Transcription failed');
       setStep('error');
-      
-      toast({
-        variant: "destructive",
-        title: "Transcription Failed",
-        description: "Unable to process your audio file",
-      });
+      toast({ variant: 'destructive', title: 'Transcription Failed', description: 'Unable to process your audio file' });
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleCopyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    toast({
-      variant: "default",
-      title: "Copied to Clipboard",
-      description: "Content has been copied to your clipboard",
-    });
-  };
-
   const handleDownload = async () => {
     if (!result) return;
-
     try {
-      const content = outputFormat === 'srt' ? result.srt_content : result.plain_text;
-      const filename = `transcription-${Date.now()}.${outputFormat === 'srt' ? 'srt' : 'txt'}`;
-      
+      const content = result.srt_content;
+      const filename = `transcription-${Date.now()}.srt`;
       const response = await api.downloadTranscription(content, filename);
-      
       if (response instanceof Response) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -175,287 +108,154 @@ export function Transcription() {
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        
-        toast({
-          variant: "default",
-          title: "Download Started",
-          description: "Transcription file is being downloaded",
-        });
+        toast({ variant: 'default', title: 'Download Started', description: 'Transcription file is being downloaded' });
       }
-    } catch (error) {
-      console.error('Download failed:', error);
-      toast({
-        variant: "destructive",
-        title: "Download Failed",
-        description: "Unable to download transcription file",
-      });
+    } catch {
+      toast({ variant: 'destructive', title: 'Download Failed', description: 'Unable to download transcription file' });
     }
   };
 
-  const reset = () => {
-    setStep('upload');
-    setSelectedFile(null);
-    setResult(null);
-    setError(null);
-    setProgress(0);
-    setIsProcessing(false);
-  };
+  const reset = () => { setStep('upload'); setSelectedFile(null); setResult(null); setError(null); setProgress(0); setIsProcessing(false); };
 
-  const getFileIcon = (file: File) => {
-    return file.type.startsWith('audio/') ? FileAudio : FileVideo;
-  };
+  const cues = result?.srt_content ? parseSrt(result.srt_content) : [];
 
   return (
-    <div className="min-h-screen bg-background page-transition">
-      <div className="max-w-4xl mx-auto py-12 px-4 space-y-8">
-        {/* Header */}
-        <div className="text-center space-y-4">
-          <h1 className="text-4xl font-bold">
-            <span className="metallic-gradient">Audio Transcription</span>
-          </h1>
-          <p className="text-xl text-muted-foreground">
-            Convert your audio and video files to accurate text transcriptions
-          </p>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%' }}>
+      {/* Page header */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap', padding: '20px 28px 16px', borderBottom: '1px solid var(--c-border)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ ...mono, fontSize: '11px', letterSpacing: '.06em', color: 'var(--c-muted)' }}>
+            09 · POST /transcription/upload · whisper-1
+          </div>
+          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 600, letterSpacing: '-0.01em' }}>Transcribe</h1>
         </div>
-
-        {/* Upload Section */}
-        {step === 'upload' && (
-          <Card className="animate-fade-in">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Mic className="w-5 h-5" />
-                Upload Media File
-              </CardTitle>
-              <CardDescription>
-                Drag and drop or select an audio/video file to transcribe
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* File Drop Zone */}
-              <div
-                className={`border-2 border-dashed rounded-lg p-12 text-center transition-all duration-200 cursor-pointer hover:border-primary/50 hover:bg-accent/20 ${
-                  isDragOver ? 'border-primary bg-accent/30' : 'border-muted-foreground/25'
-                }`}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onClick={() => document.getElementById('file-input')?.click()}
-              >
-                <div className="space-y-4">
-                  <div className="w-16 h-16 mx-auto rounded-full bg-muted flex items-center justify-center">
-                    <Upload className="w-8 h-8 text-muted-foreground" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold">Drop your file here</h3>
-                    <p className="text-muted-foreground">
-                      or click to browse files
-                    </p>
-                  </div>
-                  <div className="text-sm text-muted-foreground space-y-1">
-                    <p>Supports: MP3, WAV, MP4, MOV, AVI, M4A, FLAC</p>
-                    <p>Maximum file size: {formatFileSize(MAX_FILE_SIZE)}</p>
-                  </div>
-                </div>
-                <input
-                  id="file-input"
-                  type="file"
-                  accept="audio/*,video/*"
-                  onChange={handleFileInput}
-                  className="hidden"
-                />
-              </div>
-
-              {/* Selected File */}
-              {selectedFile && (
-                <Card className="border-metallic-gold/20 bg-metallic-gold/5">
-                  <CardContent className="p-4">
-                    <div className="flex items-center gap-4">
-                      <div className="p-3 rounded-lg bg-background/50">
-                        {(() => {
-                          const FileIcon = getFileIcon(selectedFile);
-                          return <FileIcon className="w-6 h-6 text-metallic-gold" />;
-                        })()}
-                      </div>
-                      <div className="flex-1">
-                        <h4 className="font-medium">{selectedFile.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {formatFileSize(selectedFile.size)} • {selectedFile.type}
-                        </p>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setSelectedFile(null)}
-                      >
-                        <X className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Action Buttons */}
-              <div className="flex justify-between items-center">
-                <div className="text-sm text-muted-foreground">
-                  Powered by OpenAI Whisper
-                </div>
-                <Button
-                  onClick={startTranscription}
-                  disabled={!selectedFile || isProcessing}
-                  variant="gold"
-                  size="lg"
-                >
-                  <Volume2 className="w-4 h-4 mr-2" />
-                  Start Transcription
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Processing Section */}
-        {step === 'processing' && (
-          <Card className="animate-fade-in">
-            <CardContent className="p-8 text-center space-y-6">
-              <div className="w-16 h-16 mx-auto rounded-full bg-blue-500/10 flex items-center justify-center">
-                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
-              </div>
-              <div>
-                <h3 className="text-xl font-semibold mb-2">Processing Audio</h3>
-                <p className="text-muted-foreground">
-                  Analyzing and transcribing your file...
-                </p>
-              </div>
-              <div className="max-w-md mx-auto space-y-2">
-                <Progress value={progress} className="h-3" />
-                <div className="text-sm text-muted-foreground">
-                  {progress}% complete
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Results Section */}
-        {step === 'completed' && result && (
-          <Card className="animate-fade-in">
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="flex items-center gap-2">
-                    <CheckCircle className="w-5 h-5 text-green-400" />
-                    Transcription Complete
-                  </CardTitle>
-                  <CardDescription>
-                    Your audio has been successfully transcribed
-                  </CardDescription>
-                </div>
-                <Button onClick={reset} variant="outline">
-                  New Transcription
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* File Info */}
-              {selectedFile && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-muted/50 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <FileAudio className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm">{selectedFile.name}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm">{formatDuration(result.duration)}</span>
-                  </div>
-                  {result.language && (
-                    <div className="flex items-center gap-2">
-                      <Type className="w-4 h-4 text-muted-foreground" />
-                      <span className="text-sm">{result.language}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Format Toggle */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">Output Format:</span>
-                  <div className="flex items-center gap-1 bg-muted rounded-md p-1">
-                    <Button
-                      variant={outputFormat === 'srt' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setOutputFormat('srt')}
-                    >
-                      SRT
-                    </Button>
-                    <Button
-                      variant={outputFormat === 'text' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setOutputFormat('text')}
-                    >
-                      Plain Text
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => handleCopyToClipboard(
-                      outputFormat === 'srt' ? result.srt_content : result.plain_text
-                    )}
-                    variant="outline"
-                    size="sm"
-                  >
-                    <Copy className="w-4 h-4 mr-2" />
-                    Copy
-                  </Button>
-                  <Button
-                    onClick={handleDownload}
-                    variant="gold"
-                    size="sm"
-                  >
-                    <Download className="w-4 h-4 mr-2" />
-                    Download
-                  </Button>
-                </div>
-              </div>
-
-              {/* Transcription Output */}
-              <Card className="bg-background/50 border-muted-foreground/20">
-                <CardContent className="p-4">
-                  <Textarea
-                    value={outputFormat === 'srt' ? result.srt_content : result.plain_text}
-                    readOnly
-                    className="min-h-[300px] font-mono text-sm resize-none border-0 bg-transparent"
-                  />
-                </CardContent>
-              </Card>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Error Section */}
-        {step === 'error' && (
-          <Card className="animate-fade-in border-red-500/20 bg-red-500/5">
-            <CardContent className="p-8 text-center space-y-6">
-              <div className="w-16 h-16 mx-auto rounded-full bg-red-500/10 flex items-center justify-center">
-                <AlertCircle className="w-8 h-8 text-red-400" />
-              </div>
-              <div>
-                <h3 className="text-xl font-semibold mb-2 text-red-400">
-                  Transcription Failed
-                </h3>
-                <p className="text-muted-foreground">
-                  {error || 'An error occurred during transcription'}
-                </p>
-              </div>
-              <Button onClick={reset} variant="outline">
-                Try Again
-              </Button>
-            </CardContent>
-          </Card>
+        {step === 'completed' && (
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={reset}
+              style={{ background: 'transparent', border: '1px solid var(--c-border2)', color: 'var(--c-text)', padding: '8px 12px', borderRadius: '4px', fontSize: '13px', cursor: 'pointer' }}
+            >
+              New file
+            </button>
+            <button
+              onClick={handleDownload}
+              style={{ background: 'var(--c-accent)', border: 'none', color: '#17110A', padding: '9px 14px', borderRadius: '4px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+            >
+              Download .srt
+            </button>
+          </div>
         )}
       </div>
+
+      {/* idle / upload step */}
+      {(step === 'upload') && (
+        <div style={{ padding: '28px' }}>
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={() => document.getElementById('tx-file-input')?.click()}
+            style={{
+              border: `1.5px dashed ${isDragOver ? 'var(--c-accent)' : 'var(--c-border2)'}`,
+              borderRadius: '8px',
+              padding: '56px 24px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              textAlign: 'center',
+              transition: 'border-color 0.15s',
+            }}
+          >
+            <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--c-text)' }}>
+              {selectedFile ? selectedFile.name : 'Drop an audio file, or click to choose'}
+            </div>
+            <div style={{ ...mono, fontSize: '11.5px', color: 'var(--c-muted)' }}>
+              mp3 · mp4 · wav · m4a · flac · ogg · webm — max 25 MB
+            </div>
+            <div style={{ fontSize: '12.5px', color: 'var(--c-dim)' }}>
+              Returns SRT with timestamps and a plain-text version.
+            </div>
+            {selectedFile && (
+              <button
+                onClick={e => { e.stopPropagation(); startTranscription(); }}
+                disabled={isProcessing}
+                style={{ marginTop: '8px', background: 'var(--c-accent)', border: 'none', color: '#17110A', padding: '9px 18px', borderRadius: '4px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+              >
+                Start transcription
+              </button>
+            )}
+          </div>
+          <input id="tx-file-input" type="file" accept="audio/*,video/*" onChange={handleFileInput} style={{ display: 'none' }} />
+        </div>
+      )}
+
+      {/* processing step */}
+      {step === 'processing' && (
+        <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '640px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', ...mono, fontSize: '12px' }}>
+            <span>{selectedFile?.name ?? ''} · {formatFileSize(selectedFile?.size ?? 0)}</span>
+            <span style={{ color: 'var(--c-run)' }}>transcribing</span>
+          </div>
+          <div style={{ height: '4px', background: '#1A1F25', borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--c-run)', transition: 'width 0.3s' }} />
+          </div>
+        </div>
+      )}
+
+      {/* completed step */}
+      {step === 'completed' && result && (
+        <>
+          {/* meta bar */}
+          <div style={{ padding: '12px 28px', borderBottom: '1px solid var(--c-border)', display: 'flex', gap: '22px', ...mono, fontSize: '11.5px', color: 'var(--c-muted)', flexWrap: 'wrap' }}>
+            <span style={{ color: 'var(--c-text)' }}>{selectedFile?.name}</span>
+            {selectedFile && <span>{formatFileSize(selectedFile.size)}</span>}
+            <span>{cues.length} cues</span>
+            {result.duration != null && <span>{formatDuration(result.duration)}</span>}
+            {result.language && <span>language: {result.language}</span>}
+          </div>
+
+          {/* two-column content */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', flex: 1, minHeight: 0 }}>
+            {/* SRT column */}
+            <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--c-border)' }}>
+              <div style={{ padding: '9px 28px', ...mono, fontSize: '11px', color: 'var(--c-muted)', borderBottom: '1px solid var(--c-border)' }}>srt_content</div>
+              <div style={{ overflowY: 'auto' }}>
+                {cues.map(cue => (
+                  <div key={cue.n} style={{ display: 'grid', gridTemplateColumns: '28px 210px minmax(0,1fr)', gap: '10px', padding: '8px 28px', borderBottom: '1px solid #1A1F25', fontSize: '13.5px' }}>
+                    <span style={{ ...mono, fontSize: '11px', color: 'var(--c-dim)' }}>{cue.n}</span>
+                    <span style={{ ...mono, fontSize: '11px', color: 'var(--c-accent)' }}>{cue.t}</span>
+                    <span>{cue.text}</span>
+                  </div>
+                ))}
+                {cues.length === 0 && (
+                  <pre style={{ margin: 0, padding: '16px 28px', ...mono, fontSize: '11px', color: 'var(--c-muted)', whiteSpace: 'pre-wrap' }}>{result.srt_content}</pre>
+                )}
+              </div>
+            </div>
+
+            {/* Plain text column */}
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: '9px 28px', ...mono, fontSize: '11px', color: 'var(--c-muted)', borderBottom: '1px solid var(--c-border)' }}>plain_text</div>
+              <div style={{ padding: '16px 28px', fontSize: '15px', lineHeight: 1.65, maxWidth: '62ch' }}>{result.plain_text}</div>
+              {/* Note: POST /transcription/download reads result.filename and result.text, which don't exist on TranscriptionResponse. This UI builds the .srt from srt_content on the client until that's fixed. */}
+              <div style={{ padding: '0 28px', ...mono, fontSize: '10.5px', color: 'var(--c-warn)', lineHeight: 1.5 }}>
+                Note: POST /transcription/download reads result.filename and result.text, which don't exist on TranscriptionResponse. This UI builds the .srt from srt_content on the client until that's fixed.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* error step */}
+      {step === 'error' && (
+        <div style={{ margin: '60px auto', maxWidth: '420px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
+          <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--c-fail)' }}>Transcription Failed</div>
+          <div style={{ color: 'var(--c-muted)', fontSize: '13.5px' }}>{error ?? 'An error occurred during transcription.'}</div>
+          <button onClick={reset} style={{ background: 'transparent', border: '1px solid var(--c-border2)', color: 'var(--c-text)', padding: '8px 14px', borderRadius: '4px', fontSize: '13px', cursor: 'pointer' }}>Try again</button>
+        </div>
+      )}
     </div>
   );
 }
