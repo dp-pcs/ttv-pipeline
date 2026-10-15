@@ -14,9 +14,11 @@ COMPOSE_PROD = -f docker-compose.yml -f docker-compose.prod.yml
 ifeq ($(ENV),development)
 	COMPOSE_FILES = $(COMPOSE_DEV)
 	ENV_FILE = .env.dev
+	COMPOSE_PROFILES = dev
 else ifeq ($(ENV),dev)
 	COMPOSE_FILES = $(COMPOSE_DEV)
 	ENV_FILE = .env.dev
+	COMPOSE_PROFILES = dev
 else ifeq ($(ENV),production)
 	COMPOSE_FILES = $(COMPOSE_PROD)
 	ENV_FILE = .env.prod
@@ -27,6 +29,11 @@ else
 	COMPOSE_FILES = -f docker-compose.yml
 	ENV_FILE = .env
 endif
+
+# docker-compose.dev.yml gates api/worker behind the "dev" profile (so they don't
+# clash with the nginx-fronted production services); activate it automatically
+# whenever we're targeting the dev compose files.
+PROFILE_ARGS = $(if $(COMPOSE_PROFILES),--profile $(COMPOSE_PROFILES))
 
 # Default target
 help: ## Show this help message
@@ -44,31 +51,31 @@ help: ## Show this help message
 
 build: ## Build Docker images
 	@echo "Building images for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) build
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) build
 
 up: ## Start services
 	@echo "Starting services for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) up -d
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) up -d
 
 down: ## Stop services
 	@echo "Stopping services for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) down
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) down
 
 restart: ## Restart services
 	@echo "Restarting services for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) restart
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) restart
 
 logs: ## Show service logs
 	@echo "Showing logs for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) logs -f
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) logs -f
 
 status: ## Show service status
 	@echo "Service status for $(ENV) environment:"
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) ps
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) ps
 
 clean: ## Clean up containers, networks, and volumes
 	@echo "Cleaning up $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) down -v --remove-orphans
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) down -v --remove-orphans
 	docker system prune -f
 
 health: ## Run health checks
@@ -77,7 +84,7 @@ health: ## Run health checks
 
 test: ## Run tests in containers
 	@echo "Running tests for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) exec api pytest tests/
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) exec api pytest tests/
 
 # Environment-specific shortcuts
 dev: ## Start development environment
@@ -88,11 +95,11 @@ prod: ## Start production environment
 
 gpu: ## Start with GPU support
 	@echo "Starting with GPU support for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) --profile gpu up -d
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) --profile gpu up -d
 
 debug: ## Start with debug services
 	@echo "Starting with debug services for $(ENV) environment..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) --profile debug up -d
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) --profile debug up -d
 
 # Development helpers
 dev-build: ## Build development images
@@ -135,7 +142,7 @@ backup: ## Backup Redis data and configuration
 # Scaling
 scale-workers: ## Scale workers (usage: make scale-workers REPLICAS=4)
 	@echo "Scaling workers to $(REPLICAS) replicas..."
-	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) up -d --scale worker=$(REPLICAS)
+	docker compose $(COMPOSE_FILES) --env-file $(ENV_FILE) $(PROFILE_ARGS) up -d --scale worker=$(REPLICAS)
 
 # Monitoring
 metrics: ## Show API metrics

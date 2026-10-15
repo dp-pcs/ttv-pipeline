@@ -3,6 +3,20 @@
 
 import { JobStatus, JobDetails, JobEstimate, TranscriptionResult, ApiStatus } from './types';
 
+// The Settings page's backend_selection uses UI-friendly labels that don't match
+// generators/factory.py's GENERATOR_REGISTRY keys (notably google_veo -> veo3).
+// Keep this map in sync with that registry.
+const BACKEND_TO_GENERATOR: Record<string, string> = {
+  google_veo: 'veo3',
+  runway: 'runway',
+  minimax: 'minimax',
+};
+
+function toGeneratorName(backend?: string): string | undefined {
+  if (!backend) return undefined;
+  return BACKEND_TO_GENERATOR[backend] || backend;
+}
+
 class VisionWeaveAPI {
   private baseUrl: string;
 
@@ -78,47 +92,50 @@ class VisionWeaveAPI {
   }
 
   // Job Management
+  // NOTE: job/plan routes moved under /v1 server-side; health, transcription and
+  // storage routes stayed unversioned. Keep these prefixes in sync with the
+  // backend's actual mount points (see api/main.py), not with each other.
   async estimateJob(prompt: string, title?: string): Promise<JobEstimate> {
-    return this.request('/jobs/estimate', {
+    return this.request('/v1/jobs/estimate', {
       method: 'POST',
       body: JSON.stringify({ prompt, title }),
     });
   }
 
   async createJob(prompt: string, title?: string, backend?: string): Promise<{ job_id: string }> {
-    const response = await this.request<{ id: string }>('/jobs/', {
+    const response = await this.request<{ id: string }>('/v1/jobs', {
       method: 'POST',
-      body: JSON.stringify({ 
-        prompt, 
+      body: JSON.stringify({
+        prompt,
         title,
-        generator: backend || 'veo3'
+        generator: toGeneratorName(backend) || 'veo3'
       }),
     });
     return { job_id: response.id };
   }
 
   async getJobs(): Promise<JobStatus[]> {
-    return this.request('/jobs/');
+    return this.request('/v1/jobs');
   }
 
   async getJobDetails(jobId: string): Promise<JobDetails> {
-    return this.request(`/jobs/${jobId}/details`);
+    return this.request(`/v1/jobs/${jobId}/details`);
   }
 
   async getJobStatus(jobId: string): Promise<JobStatus> {
-    return this.request(`/jobs/${jobId}`);
+    return this.request(`/v1/jobs/${jobId}`);
   }
 
   async getJobVideoUrl(jobId: string): Promise<{ video_url: string }> {
-    return this.request(`/jobs/${jobId}/video-url`);
+    return this.request(`/v1/jobs/${jobId}/video-url`);
   }
 
   async downloadJobVideo(jobId: string): Promise<Response> {
-    return this.request(`/jobs/${jobId}/download`);
+    return this.request(`/v1/jobs/${jobId}/download`);
   }
 
   async deleteJob(jobId: string): Promise<void> {
-    return this.request(`/jobs/${jobId}`, {
+    return this.request(`/v1/jobs/${jobId}`, {
       method: 'DELETE',
     });
   }
