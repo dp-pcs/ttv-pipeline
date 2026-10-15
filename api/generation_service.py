@@ -151,10 +151,29 @@ class GenerationService:
         if fallback:
             providers.append(fallback)
         result = []
+        provider_options = {}
         for provider in dict.fromkeys(providers):
             try:
                 generator = self._generator(provider)
                 raw = generator.get_capabilities()
+                # Resolution/aspect-ratio picker data for clients. Kept as a sibling of
+                # "providers", never inside a providers[] entry: plan() reuses those dicts
+                # verbatim (dict(**{**cap, ...})) when building GenerationPlan.scenes[].
+                # variants[], whose Variant/Capability schemas are additionalProperties:false
+                # — any extra key inside a providers[] item would violate that contract.
+                raw_resolutions = raw.get("supported_resolutions")
+                if raw_resolutions:
+                    # veo3's list is actually aspect ratios (see veo3_generator.py); runway's
+                    # ratio-strings double as both; minimax's/others' are literal pixel sizes.
+                    if provider == "veo3":
+                        provider_options[provider] = {"supported_aspect_ratios": raw_resolutions}
+                    elif provider == "runway":
+                        provider_options[provider] = {
+                            "supported_resolutions": raw_resolutions,
+                            "supported_aspect_ratios": raw_resolutions,
+                        }
+                    else:
+                        provider_options[provider] = {"supported_resolutions": raw_resolutions}
                 durations = raw.get("allowed_durations")
                 if durations is None:
                     from pipeline import get_backend_clip_durations
@@ -192,7 +211,7 @@ class GenerationService:
                 )
             except Exception:
                 continue
-        return {"contract_version": "1.0", "providers": result}
+        return {"contract_version": "1.0", "providers": result, "provider_options": provider_options}
 
     def plan(self, request):
         validate("GenerationRequest", request)
