@@ -51,6 +51,7 @@ services:
       - ${CREDENTIALS_PATH:-./credentials}:/app/credentials:ro
       - ${PIPELINE_CONFIG_PATH:-./pipeline_config.yaml}:/app/pipeline_config.yaml:ro
       - ${API_CONFIG_PATH:-./api_config.yaml}:/app/api_config.yaml:ro
+      - ${GENERATION_DATA_PATH:-./generation-data}:/app/generation-data
     ports:
       - "${API_HTTP_PORT:-8000}:8000/tcp"   # HTTP
       - "${API_QUIC_PORT:-8443}:8443/udp"   # QUIC
@@ -91,6 +92,7 @@ services:
       - ${CREDENTIALS_PATH:-./credentials}:/app/credentials:ro
       - ${PIPELINE_CONFIG_PATH:-./pipeline_config.yaml}:/app/pipeline_config.yaml:ro
       - ${API_CONFIG_PATH:-./api_config.yaml}:/app/api_config.yaml:ro
+      - ${GENERATION_DATA_PATH:-./generation-data}:/app/generation-data
       - /tmp:/tmp  # For temporary video processing
     depends_on:
       redis:
@@ -129,6 +131,7 @@ services:
       - ${CREDENTIALS_PATH:-./credentials}:/app/credentials:ro
       - ${PIPELINE_CONFIG_PATH:-./pipeline_config.yaml}:/app/pipeline_config.yaml:ro
       - ${API_CONFIG_PATH:-./api_config.yaml}:/app/api_config.yaml:ro
+      - ${GENERATION_DATA_PATH:-./generation-data}:/app/generation-data
       - /tmp:/tmp
     depends_on:
       redis:

@@ -192,7 +192,7 @@ export function PlanPage() {
       const approval = await buildApproval(plan, approvedVariantIds, executionMode, allowUnknownCost);
       const job = await approvePlan(approval);
       setActiveJob(job);
-      router.push(executionMode === 'keyframes' ? '/storyboard' : '/run');
+      router.push('/run');
     } catch (err) {
       const message = err instanceof ApiV2Error ? err.message : 'Failed to approve plan';
       toast({ variant: 'destructive', title: 'Approval failed', description: message });
