@@ -1,5 +1,7 @@
 'use client';
 
+import type { SceneDraft } from './produce-store';
+
 import { api } from './api';
 
 // ============================================================================
@@ -204,13 +206,15 @@ export interface GenerationResult {
     scene_id: string;
     order: number;
     status: string;
+    actual_shots: ActualShot[];
+    attempts: Attempt[];
     clips: Array<{ clip_id: string; attempt_id: string; asset: AssetRef; media: unknown }>;
-    keyframes: Array<{ shot_id: string; order: number; position: string; attempt_id: string; asset: AssetRef; media: unknown }>;
+    keyframes: Array<{ shot_id: string; order: number; position: string; attempt_id: string | null; asset: AssetRef; media: unknown }>;
     takes: Array<{
       take_id: string;
       clip_ids: string[];
-      clip_order: string[];
-      preview_asset_id: string;
+      clip_order: Record<string, number>;
+      preview_asset_id: string | null;
       supersedes_take_ids: string[];
       depends_on_take_ids: string[];
       nominal_duration_s: number;
@@ -233,6 +237,46 @@ export interface CapabilitiesResponse {
   // see the comment in api/generation_service.py's capabilities() for why this
   // can't live inside a providers[] entry.
   provider_options: Record<string, { supported_resolutions?: string[]; supported_aspect_ratios?: string[] }>;
+}
+
+export interface AttemptError {
+  code: string;
+  message: string;
+}
+
+export interface Billing {
+  raw_unit_name: string | null;
+  raw_units: string | null;
+  estimated_usd: number | null;
+  actual_usd: number | null;
+  currency: 'USD';
+}
+
+export interface Attempt {
+  attempt_id: string;
+  shot_id: string;
+  attempt_number: number;
+  provider: string;
+  model: string | null;
+  model_version: string | null;
+  provider_request_id: string | null;
+  prompt_snapshot: string;
+  reference_asset_ids: string[];
+  generation_parameters: Record<string, string | number | boolean | null>;
+  seed: number | null;
+  started_at: string;
+  finished_at: string;
+  status: 'succeeded' | 'failed' | 'canceled';
+  fallback_from_attempt_id: string | null;
+  error: AttemptError | null;
+  billing: Billing;
+}
+
+export interface ActualShot {
+  shot_id: string;
+  order: number;
+  nominal_duration_s: number;
+  continuity_mode: string;
 }
 
 // ============================================================================
@@ -321,6 +365,68 @@ export async function buildSingleSceneRequest(
     ],
   };
   return seal(unsealed);
+}
+
+export interface MultiSceneRequestOpts {
+  projectId: string;
+  revision: number;
+  storyboardRevisionId: string;
+  regeneration: {
+    base_result_ids: string[];
+    supersedes_take_ids: string[];
+    reason: string;
+  } | null;
+}
+
+export async function buildMultiSceneRequest(
+  scenes: SceneDraft[],
+  opts: MultiSceneRequestOpts
+): Promise<GenerationRequest> {
+  const storyboardSha = await digest({ scenes: scenes.map(s => s.id) });
+  const sceneObjects = scenes.map((s, i) => ({
+    scene_id: s.id,
+    order: i,
+    intent: {
+      summary: s.summary,
+      entry_state: s.entry,
+      exit_state: s.exit,
+      continuity_notes: s.notes,
+    },
+    requested_duration_s: s.dur,
+    transition_out: { type: s.transition, editorial_note: null },
+    continuity: {
+      mode: s.mode,
+      required_reference_asset_ids: s.refs.map(r => `asset_${r.name.replace(/[^a-z0-9]/gi, '_')}`),
+    },
+    reference_assets: [],
+    delivery: {
+      aspect_ratio: s.aspect,
+      target_width: s.w,
+      target_height: s.h,
+      audio_policy: s.audio,
+    },
+    generation_policy: {
+      provider_preferences: s.prefs,
+      max_attempts: s.attempts,
+      max_estimated_cost_usd: s.cap,
+      allow_provider_fallback: s.fallback,
+    },
+  }));
+
+  const unsealed = {
+    contract_version: '1.0' as const,
+    created_at: nowIso(),
+    document_sha256: '',
+    request_id: `genreq-${newId()}`,
+    project_id: opts.projectId,
+    revision: opts.revision,
+    supersedes_request_id: null,
+    idempotency_key: newId(),
+    storyboard: { revision_id: opts.storyboardRevisionId, sha256: storyboardSha },
+    regeneration: opts.regeneration,
+    scenes: sceneObjects,
+  };
+  return seal(unsealed as Parameters<typeof seal>[0]);
 }
 
 export async function createPlan(request: GenerationRequest): Promise<GenerationPlan> {

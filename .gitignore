@@ -15,6 +15,7 @@ research
 
 # Configuration files with sensitive information
 pipeline_config.yaml
+pipeline_config.bridges.yaml
 
 # Docker and deployment files
 .env

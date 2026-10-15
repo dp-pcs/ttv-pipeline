@@ -1,6 +1,5 @@
+import { ComposePage } from '@/components/produce/compose-page';
 
-import { Dashboard } from '@/components/dashboard/dashboard';
-
-export default function HomePage() {
-  return <Dashboard />;
+export default function Page() {
+  return <ComposePage />;
 }
